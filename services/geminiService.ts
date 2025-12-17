@@ -10,24 +10,154 @@ const fallbackLayout: ParkingLayout = { width: 800, height: 600, elements: [] };
 const MODEL_PRIMARY = "gemini-3-pro-preview";
 const MODEL_FALLBACK = "gemini-2.5-pro"; 
 
-const LayoutElementSchema = z.object({
-  id: z.string().optional(),
-  t: z.string().optional(),
-  type: z.string().optional(),
-  x: z.union([z.number(), z.string()]).transform(Number),
-  y: z.union([z.number(), z.string()]).transform(Number),
-  w: z.union([z.number(), z.string()]).transform(Number).optional(),
-  width: z.union([z.number(), z.string()]).transform(Number).optional(),
-  h: z.union([z.number(), z.string()]).transform(Number).optional(),
-  height: z.union([z.number(), z.string()]).transform(Number).optional(),
-  r: z.union([z.number(), z.string()]).transform(Number).optional(),
-  l: z.string().optional()
-});
-
 let cachedTier: 'HIGH' | 'LOW' | null = null;
 
 const getApiKey = () => process.env.API_KEY;
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+// --- ALGORITHM: GEOMETRIC PARKING SPOT FILLER ---
+const fillParkingAutomatically = (layout: ParkingLayout): ParkingLayout => {
+  const existingElements = [...layout.elements];
+  const grounds = existingElements.filter(e => e.type === ElementType.GROUND);
+  const roads = existingElements.filter(e => e.type === ElementType.ROAD);
+  
+  // Obstacles to avoid
+  const obstacles = existingElements.filter(e => 
+    [ElementType.WALL, ElementType.STAIRCASE, ElementType.ELEVATOR, ElementType.PILLAR,
+     ElementType.ENTRANCE, ElementType.EXIT, ElementType.RAMP, ElementType.SAFE_EXIT,
+     ElementType.SIDEWALK, ElementType.PARKING_SPACE].includes(e.type as ElementType)
+  );
+  
+  const genSpots: LayoutElement[] = [];
+  const SPOT_S = 24; // Width
+  const SPOT_L = 48; // Length
+  const GAP = 2;     // Space between spots
+  const BUFFER = 4;  
+  const TOLERANCE = 12; 
+
+  const isSafe = (rect: {x: number, y: number, w: number, h: number}) => {
+      const m = 1; 
+      const hitObstacle = obstacles.some(o => 
+        rect.x + m < o.x + o.width && rect.x + rect.w - m > o.x &&
+        rect.y + m < o.y + o.height && rect.y + rect.h - m > o.y
+      );
+      const hitSelf = genSpots.some(o => 
+        rect.x + m < o.x + o.width && rect.x + rect.w - m > o.x &&
+        rect.y + m < o.y + o.height && rect.y + rect.h - m > o.y
+      );
+      return !hitObstacle && !hitSelf;
+  };
+
+  let t = 0; 
+
+  roads.forEach(r => {
+      const rr = { l: r.x, r: r.x + r.width, t: r.y, b: r.y + r.height };
+      
+      grounds.forEach(g => {
+          const gr = { l: g.x, r: g.x + g.width, t: g.y, b: g.y + g.height };
+          
+          // Case A: Ground is below Road (Horizontal Road)
+          if (Math.abs(rr.b - gr.t) < TOLERANCE && Math.min(rr.r, gr.r) > Math.max(rr.l, gr.l)) {
+               const sx = Math.max(rr.l, gr.l) + BUFFER;
+               const ex = Math.min(rr.r, gr.r) - BUFFER;
+               const cnt = Math.floor((ex - sx) / (SPOT_S + GAP)); 
+               
+               for(let i=0; i<cnt; i++) {
+                   const s = { x: sx + i*(SPOT_S+GAP), y: gr.t + 2, w: SPOT_S, h: SPOT_L };
+                   if (isSafe(s)) {
+                       genSpots.push({ 
+                           id: `p_auto_${++t}`, 
+                           type: ElementType.PARKING_SPACE, 
+                           x: s.x, y: s.y, width: s.w, height: s.h,
+                           rotation: 0 
+                       });
+                   }
+               }
+          }
+          // Case B: Ground is above Road (Horizontal Road)
+          else if (Math.abs(rr.t - gr.b) < TOLERANCE && Math.min(rr.r, gr.r) > Math.max(rr.l, gr.l)) {
+              const sx = Math.max(rr.l, gr.l) + BUFFER;
+              const ex = Math.min(rr.r, gr.r) - BUFFER;
+              const cnt = Math.floor((ex - sx) / (SPOT_S + GAP));
+              
+              for(let i=0; i<cnt; i++) {
+                   const s = { x: sx + i*(SPOT_S+GAP), y: gr.b - SPOT_L - 2, w: SPOT_S, h: SPOT_L };
+                   if (isSafe(s)) {
+                       genSpots.push({ 
+                           id: `p_auto_${++t}`, 
+                           type: ElementType.PARKING_SPACE, 
+                           x: s.x, y: s.y, width: s.w, height: s.h,
+                           rotation: 0 
+                       });
+                   }
+              }
+          }
+          // Case C: Ground is right of Road (Vertical Road)
+          else if (Math.abs(rr.r - gr.l) < TOLERANCE && Math.min(rr.b, gr.b) > Math.max(rr.t, gr.t)) {
+              const sy = Math.max(rr.t, gr.t) + BUFFER;
+              const ey = Math.min(rr.b, gr.b) - BUFFER;
+              const cnt = Math.floor((ey - sy) / (SPOT_S + GAP));
+
+              for(let i=0; i<cnt; i++) {
+                  const s = { x: gr.l + 2, y: sy + i*(SPOT_S+GAP), w: SPOT_L, h: SPOT_S };
+                  if (isSafe(s)) {
+                      genSpots.push({
+                          id: `p_auto_v_${++t}`,
+                          type: ElementType.PARKING_SPACE,
+                          x: s.x, y: s.y, width: s.w, height: s.h,
+                          rotation: 0
+                      });
+                  }
+              }
+          }
+          // Case D: Ground is left of Road (Vertical Road)
+          else if (Math.abs(rr.l - gr.r) < TOLERANCE && Math.min(rr.b, gr.b) > Math.max(rr.t, gr.t)) {
+              const sy = Math.max(rr.t, gr.t) + BUFFER;
+              const ey = Math.min(rr.b, gr.b) - BUFFER;
+              const cnt = Math.floor((ey - sy) / (SPOT_S + GAP));
+
+              for(let i=0; i<cnt; i++) {
+                  const s = { x: gr.r - SPOT_L - 2, y: sy + i*(SPOT_S+GAP), w: SPOT_L, h: SPOT_S };
+                  if (isSafe(s)) {
+                      genSpots.push({
+                          id: `p_auto_v_${++t}`,
+                          type: ElementType.PARKING_SPACE,
+                          x: s.x, y: s.y, width: s.w, height: s.h,
+                          rotation: 0
+                      });
+                  }
+              }
+          }
+      });
+  });
+
+  return { ...layout, elements: [...existingElements, ...genSpots] };
+};
+
+// --- SAFETY: CLEANUP INVALID ELEMENTS ---
+const cleanupPillars = (layout: ParkingLayout): ParkingLayout => {
+    const roads = layout.elements.filter(e => e.type === ElementType.ROAD);
+    const spots = layout.elements.filter(e => e.type === ElementType.PARKING_SPACE);
+    
+    return {
+        ...layout,
+        elements: layout.elements.filter(el => {
+            if (el.type !== ElementType.PILLAR) return true;
+            
+            const isOnRoad = roads.some(r => 
+                el.x < r.x + r.width && el.x + el.width > r.x &&
+                el.y < r.y + r.height && el.y + el.height > r.y
+            );
+            // Pillars shouldn't be inside spots either, usually they are at the corners
+            const isInsideSpot = spots.some(s => 
+                el.x > s.x + 2 && el.x + el.width < s.x + s.width - 2 &&
+                el.y > s.y + 2 && el.y + el.height < s.y + s.height - 2
+            );
+
+            return !isOnRoad && !isInsideSpot;
+        })
+    };
+};
 
 const mergeLayoutElements = (
   original: LayoutElement[], 
@@ -279,24 +409,14 @@ const runIterativeFix = async (
             
             const fixedLayout = mapToInternalLayout(rawData);
             
-            // --- STRICT PRESERVATION STRATEGY ---
             const countDiff = fixedLayout.elements.length - currentLayout.elements.length;
             const originalGroundCount = currentLayout.elements.filter(e => e.type === ElementType.GROUND).length;
             const newGroundCount = fixedLayout.elements.filter(e => e.type === ElementType.GROUND).length;
-            
-            // Any reduction in the ground layer is suspicious (AI likely deleted to avoid overlap)
             const groundReduced = newGroundCount < originalGroundCount;
 
-            const shouldUseMerge = 
-                model === MODEL_FALLBACK || 
-                countDiff < 0 || 
-                groundReduced;
+            const shouldUseMerge = model === MODEL_FALLBACK || countDiff < 0 || groundReduced;
 
             if (shouldUseMerge) {
-                const missingCount = currentLayout.elements.length - fixedLayout.elements.length;
-                if (missingCount > 0 || groundReduced) {
-                     onLog?.(`🛡️ Strict Merge: Preserve ${originalGroundCount} Ground elements (vs AI's ${newGroundCount}).`);
-                }
                 currentLayout = {
                     ...currentLayout,
                     elements: mergeLayoutElements(currentLayout.elements, fixedLayout.elements)
@@ -352,17 +472,23 @@ export const augmentLayoutWithRoads = async (currentLayout: ParkingLayout, onLog
     }, 2);
     
     const rawData = cleanAndParseJSON(response.text);
-    if (rawData.reasoning_plan && onLog) onLog(`✨ Refinement Plan: ${rawData.reasoning_plan}`);
+    if (rawData.reasoning_plan && onLog) onLog(`✨ AI Plan: ${rawData.reasoning_plan}`);
 
     const aiGeneratedLayout = mapToInternalLayout(rawData);
     const newElements = aiGeneratedLayout.elements;
-    onLog?.(`Adding ${newElements.length} detailed elements.`);
+    onLog?.(`AI suggested ${newElements.length} detailed elements.`);
 
     let layout: ParkingLayout = {
         width: currentLayout.width,
         height: currentLayout.height,
         elements: [...currentLayout.elements, ...newElements]
     };
+
+    onLog?.("📐 Running Algorithmic Spot Filler...");
+    layout = fillParkingAutomatically(layout);
+
+    onLog?.("🧹 Cleaning up illegal pillars...");
+    layout = cleanupPillars(layout);
 
     onLog?.("⚖️ Resolving pedestrian/road conflicts...");
     layout.elements = resolvePriorityConflicts(layout.elements);

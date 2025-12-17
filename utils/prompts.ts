@@ -41,26 +41,27 @@ export const PROMPTS = {
 
   refinement: (simplifiedLayout: any, width: number, height: number) => `
     You are a **Spatial Algorithm Engine**.
-    Task: Inject NEW detailed elements into the existing layout.
+    Task: Inject NEW detailed structural and facility elements into the existing layout.
 
     **INPUT DATA**: 
     - Canvas: ${width}x${height}
     - Existing Elements: 
     ${JSON.stringify(simplifiedLayout.elements)}
 
-    **CRITICAL SPATIAL AWARENESS**:
-    - The Input Data contains existing 'parking_space' and 'driving_lane'.
-    - **DO NOT** place 'pillar' or 'facility' inside a 'parking_space' or on a 'driving_lane'.
-    - If a specific x/y is occupied, shift the new element by 20 units.
+    **CRITICAL SYSTEM ARCHITECTURE**:
+    - **Algorithmic Spot Filler**: A deterministic algorithm will automatically fill all 'ground' strips with 'parking_spot' elements after your turn. 
+    - **YOUR FOCUS**: You must place facilities (stairs, elevators), pillars at row ends, and road markings. DO NOT waste tokens drawing hundreds of parking spots.
 
     **INCREMENTAL UPDATE**:
     - Return **ONLY** the NEW elements you are creating. Existing walls/roads will be preserved.
 
     **GENERATION TASKS**:
     1. **Layer 1: Structural Grid ('pillar')**
-       - Place 'pillar' (size 10x10) at corners of 'parking_spot' rows.
-       - Max 1 pillar every 100 units. Sparsity is key.
+       - Place 'pillar' (size 10x10) at corners of 'ground' areas.
+       - Max 1 pillar every 100-150 units. Sparsity is key.
+       - Pillars provide structural integrity to the parking islands.
        - **CONSTRAINT**: Pillars must be INSET by 5 units from any edge.
+
     2. **Layer 2: Road Logic**
        - **'ground_line'**: Dashed lines (width 2) in the center of driving lanes. Skip intersections.
        - **'guidance_sign'**: (10x10) Place at T-junctions.
