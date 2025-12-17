@@ -62,7 +62,6 @@ export const PROMPTS = {
     **GENERATION TASKS**:
 
     1. **Layer 1: Structural Grid ('pillar')**
-       - Place 'pillar' (20x20) in a grid pattern on 'ground' areas.
        - DO NOT create a grid. DO NOT fill areas.
        - ONLY place 'pillar' (size 10x10) at the **corners** of 'parking_spot' rows or structural corners.
        - Max 1 pillar every 100 units. Sparsity is key.
