@@ -107,7 +107,10 @@ export const PROMPTS = {
     **CORE PHILOSOPHY**: 
     1. **Connectivity requires Touching**: It is acceptable for elements to share an edge (overlap < 2px). DO NOT move elements if the overlap is trivial.
     2. **Closed Loop**: The perimeter MUST be sealed. No "black holes" at corners.
-    3. **Ground Integrity (CRITICAL)**: 'ground' elements support 'parking_space'. **NEVER SHRINK 'ground'** in a way that creates gaps between the ground and the road. The ground MUST touch the road.
+    3. **Ground Integrity (CRITICAL)**: 'ground' elements support 'parking_space'. 
+    4. **NEVER SHRINK** 'ground' or 'road' elements to fix overlaps.
+    5. Shrinking creates ugly gaps (black holes) which are prohibited.
+    6. **CORRECT FIX**: If 'ground' overlaps 'road', **SNAP** the edge to match exactly, or allow a 1px overlap. Touching is required.
 
     **HIERARCHY OF TRUTH (Strict Priority)**:
     1. **Immutable**: Walls (ID: wall_*) & Entrances/Exits - NEVER MOVE.

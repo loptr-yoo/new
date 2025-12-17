@@ -194,29 +194,63 @@ export function validateLayout(layout: ParkingLayout): ConstraintViolation[] {
   // 2. Overlap Checks
   const solidTypes = new Set([
     ElementType.PARKING_SPACE, ElementType.PILLAR, ElementType.WALL, 
-    ElementType.STAIRCASE, ElementType.ELEVATOR, ElementType.ROAD, ElementType.RAMP, ElementType.CHARGING_STATION,
-    ElementType.ENTRANCE, ElementType.EXIT
+    ElementType.STAIRCASE, ElementType.ELEVATOR, ElementType.ROAD, ElementType.RAMP, 
+    ElementType.CHARGING_STATION, ElementType.ENTRANCE, ElementType.EXIT,
+    ElementType.FIRE_EXTINGUISHER, ElementType.GROUND
   ]);
   
   const solids = layout.elements.filter(e => solidTypes.has(e.type as ElementType));
 
+  // ★★★ 核心修改：定义允许重叠的白名单 ★★★
+  // 格式为 "TypeA:TypeB"，必须按字母顺序排列 (例如 'a_type:b_type')
+  const allowedOverlaps = new Set([
+      // 1. 停车位相关 (User Rule: 停车位只与消防、充电桩、ground重合)
+      `${ElementType.CHARGING_STATION}:${ElementType.PARKING_SPACE}`,
+      `${ElementType.FIRE_EXTINGUISHER}:${ElementType.PARKING_SPACE}`,
+      `${ElementType.GROUND}:${ElementType.PARKING_SPACE}`,
+      
+      // 2. 设施与地面的关系 (设施必须在地面上)
+      `${ElementType.CHARGING_STATION}:${ElementType.GROUND}`,
+      `${ElementType.CHARGING_STATION}:${ElementType.GROUND}`,
+      `${ElementType.FIRE_EXTINGUISHER}:${ElementType.GROUND}`,
+      `${ElementType.PILLAR}:${ElementType.GROUND}`,
+      
+      // 3. 消除黑洞的关键：允许路和地、墙和地有微小重叠，防止裂缝
+      `${ElementType.GROUND}:${ElementType.ROAD}`, 
+      `${ElementType.GROUND}:${ElementType.WALL}`,
+
+      // 4. 连接件逻辑
+      `${ElementType.RAMP}:${ElementType.ROAD}`,
+      `${ElementType.ENTRANCE}:${ElementType.RAMP}`,
+      `${ElementType.EXIT}:${ElementType.RAMP}`,
+      `${ElementType.ENTRANCE}:${ElementType.WALL}`,
+      `${ElementType.EXIT}:${ElementType.WALL}`,
+  ]);
+
   solids.forEach(el1 => {
       const candidates = grid.getPotentialCollisions(el1);
       candidates.forEach(el2 => {
-          if (el1.id >= el2.id) return; 
+          if (el1.id >= el2.id) return; // 避免重复检查 A vs B 和 B vs A
 
-          if (el1.type === ElementType.PARKING_SPACE && (el2.type === ElementType.GROUND || el2.type === ElementType.CHARGING_STATION)) return;
-          if (el2.type === ElementType.PARKING_SPACE && (el1.type === ElementType.GROUND || el1.type === ElementType.CHARGING_STATION)) return;
-          if (el1.type === ElementType.WALL && el2.type === ElementType.WALL) return;
-          if (el1.type === ElementType.ROAD && el2.type === ElementType.ROAD) return;
-          if ((el1.type === ElementType.WALL && (el2.type === ElementType.ENTRANCE || el2.type === ElementType.EXIT)) ||
-              (el2.type === ElementType.WALL && (el1.type === ElementType.ENTRANCE || el1.type === ElementType.EXIT))) return;
+          // 生成排序后的 Key，确保顺序一致
+          const types = [el1.type, el2.type].sort();
+          const pairKey = `${types[0]}:${types[1]}`;
+
+          // ★ 检查白名单
+          if (allowedOverlaps.has(pairKey)) return;
+
+          // 特殊逻辑：同类型允许轻微接触，但为了严谨通常也检查
+          if (el1.type === el2.type && el1.type === ElementType.WALL) return;
+          if (el1.type === el2.type && el1.type === ElementType.ROAD) return;
 
           const box = getIntersectionBox(el1, el2);
           if (box) {
+              // ★ 容差处理：忽略 < 1px 的浮点数误差重叠，防止 AI 误判
+              if (box.width < 0.5 && box.height < 0.5) return;
+
               violations.push({
                 elementId: el1.id, targetId: el2.id, type: 'overlap',
-                message: `${el1.type} overlaps with ${el2.type} (${Math.round(box.width)}x${Math.round(box.height)})`
+                message: `❌ Illegal Overlap: ${el1.type} cannot overlap ${el2.type}`
               });
           }
       });

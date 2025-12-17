@@ -134,76 +134,64 @@ const fillParkingAutomatically = (layout: ParkingLayout): ParkingLayout => {
   return { ...layout, elements: [...existingElements, ...genSpots] };
 };
 
+
 // --- ALGORITHM: CHARGING STATION GENERATOR ---
 const generateChargingStations = (layout: ParkingLayout): ParkingLayout => {
     const spots = layout.elements.filter(e => e.type === ElementType.PARKING_SPACE);
     const roads = layout.elements.filter(e => e.type === ElementType.ROAD);
     const stations: LayoutElement[] = [];
     
-    // Group spots by proximity to handle them in logical clusters (rows)
-    // A simple way is to sort them by Y then X
+    // 简单的排序，按行处理
     const sortedSpots = [...spots].sort((a, b) => {
-        if (Math.abs(a.y - b.y) < 10) return a.x - b.x; // Same row (roughly)
+        if (Math.abs(a.y - b.y) < 10) return a.x - b.x;
         return a.y - b.y;
     });
 
     let stationCount = 0;
     const STATION_SIZE = 10;
-    
+    const OFFSET = 2; // ★ 关键：内缩 2px，确保充电桩在车位内部，不撞墙
+
     sortedSpots.forEach((spot, index) => {
-        // Place a station every 3 spots
+        // 每 3 个车位生成一个充电桩
         if ((index + 1) % 3 === 0) {
-            // Find the nearest road to determine orientation
-            // We want to place the station on the side furthest from the road
             
-            // Define 4 candidate points around the spot (top, bottom, left, right)
+            // 1. 定义四个候选位置（全部在车位【内部】的边缘中心）
+            //    这样完全避免了 "左边右边" 或 "正中间" 的问题，只在首尾两端
             const candidates = [
-                { x: spot.x + spot.width / 2 - STATION_SIZE / 2, y: spot.y - STATION_SIZE, side: 'top' },    // Top
-                { x: spot.x + spot.width / 2 - STATION_SIZE / 2, y: spot.y + spot.height, side: 'bottom' },  // Bottom
-                { x: spot.x - STATION_SIZE, y: spot.y + spot.height / 2 - STATION_SIZE / 2, side: 'left' },  // Left
-                { x: spot.x + spot.width, y: spot.y + spot.height / 2 - STATION_SIZE / 2, side: 'right' }    // Right
+                // Top Edge (Inside, Centered)
+                { x: spot.x + spot.width/2 - STATION_SIZE/2, y: spot.y + OFFSET, side: 'top' },
+                // Bottom Edge (Inside, Centered)
+                { x: spot.x + spot.width/2 - STATION_SIZE/2, y: spot.y + spot.height - STATION_SIZE - OFFSET, side: 'bottom' },
+                // Left Edge (Inside, Centered)
+                { x: spot.x + OFFSET, y: spot.y + spot.height/2 - STATION_SIZE/2, side: 'left' },
+                // Right Edge (Inside, Centered)
+                { x: spot.x + spot.width - STATION_SIZE - OFFSET, y: spot.y + spot.height/2 - STATION_SIZE/2, side: 'right' }
             ];
 
-            // Filter valid candidates based on spot orientation (width vs height)
-            // If spot is vertical (H > W), station should be top or bottom
-            // If spot is horizontal (W > H), station should be left or right
             const isVerticalSpot = spot.height > spot.width;
             
-            let validCandidates = candidates.filter(c => {
+            // 2. 严格筛选：垂直车位只允许上下，水平车位只允许左右
+            const validCandidates = candidates.filter(c => {
                  if (isVerticalSpot) return c.side === 'top' || c.side === 'bottom';
                  return c.side === 'left' || c.side === 'right';
             });
 
-            // Find nearest road distance for the spot center
-            const scx = spot.x + spot.width / 2;
-            const scy = spot.y + spot.height / 2;
-            
+            // 3. 寻找离道路【最远】的候选点 (即“屁股”)
             let bestCandidate = validCandidates[0];
             let maxDistToRoad = -1;
 
             validCandidates.forEach(cand => {
-                // Calculate distance from this candidate to the nearest road
-                // Actually, we want the side of the spot that is FURTHEST from the road.
-                // So we check the distance of the Candidate to the Road.
-                // BUT, simpler logic: 
-                // 1. Find the nearest road to the spot center.
-                // 2. Determine if road is above/below/left/right.
-                // 3. Pick the opposite side.
-                
                 let minDistToRoad = Infinity;
                 roads.forEach(r => {
-                    // Simple distance check to road bounding box
+                    // 计算充电桩中心到道路中心的距离
                     const rcx = r.x + r.width / 2;
                     const rcy = r.y + r.height / 2;
-                    
-                    // Approximate distance logic
-                    const dx = Math.max(Math.abs(cand.x - rcx) - r.width / 2, 0);
-                    const dy = Math.max(Math.abs(cand.y - rcy) - r.height / 2, 0);
-                    const dist = Math.sqrt(dx * dx + dy * dy);
-                    
+                    // 使用简单的欧几里得距离
+                    const dist = Math.sqrt(Math.pow(cand.x - rcx, 2) + Math.pow(cand.y - rcy, 2));
                     if (dist < minDistToRoad) minDistToRoad = dist;
                 });
 
+                // 我们要找离路最远的那个点（Parking Butt）
                 if (minDistToRoad > maxDistToRoad) {
                     maxDistToRoad = minDistToRoad;
                     bestCandidate = cand;
@@ -229,6 +217,7 @@ const generateChargingStations = (layout: ParkingLayout): ParkingLayout => {
         elements: [...layout.elements, ...stations]
     };
 };
+
 
 // --- SAFETY: CLEANUP INVALID ELEMENTS ---
 const cleanupPillars = (layout: ParkingLayout): ParkingLayout => {
