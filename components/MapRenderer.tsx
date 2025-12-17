@@ -6,7 +6,7 @@ import { useStore } from '../store';
 const ELEMENT_STYLES: Record<string, { fill: string; opacity: number }> = {
   [ElementType.GROUND]: { fill: '#334155', opacity: 1 }, 
   [ElementType.ROAD]: { fill: '#1e293b', opacity: 1 },   
-  [ElementType.PARKING_SPACE]: { fill: '#3b82f6', opacity: 0.9 },
+  [ElementType.PARKING_SPACE]: { fill: '#3b82f6', opacity: 1 },
   [ElementType.SIDEWALK]: { fill: '#1e293b', opacity: 1 }, 
   [ElementType.RAMP]: { fill: '#c026d3', opacity: 1 },
   [ElementType.PILLAR]: { fill: '#94a3b8', opacity: 1 },
@@ -134,18 +134,31 @@ const MapRenderer = forwardRef<MapRendererHandle>((props, ref) => {
                .style("shape-rendering", "geometricPrecision"); 
         } 
         else if (d.type === ElementType.SIDEWALK) {
-            g.append("rect").attr("width", w).attr("height", h).attr("fill", style.fill);
+            // Zebra crossing style: Only white stripes, no background rect
             const isVertical = h > w;
-            const stripeCount = 3;
+            const stripeCount = Math.floor(Math.max(w, h) / 8); 
+            
             if (isVertical) {
-                const stripeH = h / (stripeCount * 2 + 1);
+                const stripeH = h / (stripeCount * 2 - 1);
                 for(let i=0; i<stripeCount; i++) {
-                    g.append("rect").attr("x", 0).attr("y", stripeH + i * 2 * stripeH).attr("width", w).attr("height", stripeH).attr("fill", "#cbd5e1");
+                    g.append("rect")
+                        .attr("x", 0)
+                        .attr("y", i * 2 * stripeH)
+                        .attr("width", w)
+                        .attr("height", stripeH)
+                        .attr("fill", "#CBD5E1") //  绑定全局语义颜色
+                        .attr("opacity", 1);      //  强制不透明度为 1
                 }
             } else {
-                const stripeW = w / (stripeCount * 2 + 1);
+                const stripeW = w / (stripeCount * 2 - 1);
                 for(let i=0; i<stripeCount; i++) {
-                    g.append("rect").attr("x", stripeW + i * 2 * stripeW).attr("y", 0).attr("width", stripeW).attr("height", h).attr("fill", "#cbd5e1");
+                    g.append("rect")
+                        .attr("x", i * 2 * stripeW)
+                        .attr("y", 0)
+                        .attr("width", stripeW)
+                        .attr("height", h)
+                        .attr("fill", "#CBD5E1") //  绑定全局语义颜色
+                        .attr("opacity", 1);      //  强制不透明度为 1
                 }
             }
         }
