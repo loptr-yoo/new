@@ -9,6 +9,10 @@ class SpatialGrid {
         this.cellSize = cellSize;
     }
 
+    private getKey(x: number, y: number): string {
+        return `${Math.floor(x / this.cellSize)},${Math.floor(y / this.cellSize)}`;
+    }
+
     private getKeysForElement(el: LayoutElement): string[] {
         const startX = Math.floor(el.x / this.cellSize);
         const endX = Math.floor((el.x + el.width) / this.cellSize);
@@ -54,12 +58,12 @@ class SpatialGrid {
 }
 
 // --- GEOMETRY UTILS ---
-const EPSILON = 1.5;
+const EPSILON = 1.5; // 容差值：小于 1.5px 的重叠视为“刚好接触”而非“非法重叠”
 
 const cornerCache = new Map<string, {x: number, y: number}[]>();
 
 function getCorners(el: LayoutElement): {x: number, y: number}[] {
-    const cacheKey = `${el.id}_${el.x}_${el.y}_${el.width}_${el.height}_${el.rotation || 0}`;
+    const cacheKey = `${el.id}_${el.x}_${el.y}_${el.width}_${el.height}_${el.rotation}`;
     if (cornerCache.has(cacheKey)) {
         return cornerCache.get(cacheKey)!;
     }
@@ -73,12 +77,12 @@ function getCorners(el: LayoutElement): {x: number, y: number}[] {
         { x: el.x + el.width, y: el.y },
         { x: el.x + el.width, y: el.y + el.height },
         { x: el.x, y: el.y + el.height },
-    ].map(p => {
+    ].map((p) => {
         const dx = p.x - cx;
         const dy = p.y - cy;
         return {
-            x: cx + dx * Math.cos(rad) - dy * Math.sin(rad),
-            y: cy + dx * Math.sin(rad) + dy * Math.cos(rad),
+        x: cx + dx * Math.cos(rad) - dy * Math.sin(rad),
+        y: cy + dx * Math.sin(rad) + dy * Math.cos(rad),
         };
     });
 
@@ -95,6 +99,7 @@ function isPolygonsIntersecting(a: {x: number, y: number}[], b: {x: number, y: n
     const polygon = polygons[i];
     for (let j = 0; j < polygon.length; j++) {
       const k = (j + 1) % polygon.length;
+      
       const nx = polygon[k].y - polygon[j].y;
       const ny = polygon[j].x - polygon[k].x;
 
@@ -114,7 +119,7 @@ function isPolygonsIntersecting(a: {x: number, y: number}[], b: {x: number, y: n
         if (projected > maxB) maxB = projected;
       }
 
-      if (maxA <= minB + 0.1 || maxB <= minA + 0.1) {
+      if (maxA < minB || maxB < minA) {
         return false;
       }
     }
@@ -131,6 +136,7 @@ export function getIntersectionBox(r1: LayoutElement, r2: LayoutElement) {
     const width = x2 - x1;
     const height = y2 - y1;
 
+    // 关键修复：如果重叠宽或高小于 EPSILON，视为“边缘接触”，不返回相交框
     if (width > EPSILON && height > EPSILON) {
         return { x: x1, y: y1, width, height };
     }
@@ -149,12 +155,15 @@ function isOverlapping(road: LayoutElement, item: LayoutElement, pad: number = 0
    return isPolygonsIntersecting(getCorners(road), getCorners(item));
 }
 
+// 连接性检查：允许 2px 的宽限期，只要“接近”即视为连接
 function isTouching(a: LayoutElement, b: LayoutElement): boolean {
     const aCorners = getCorners(a);
     const bCorners = getCorners(b);
     
+    // 基础 SAT 检查
     if (isPolygonsIntersecting(aCorners, bCorners)) return true;
 
+    // 边界框接近度检查 (用于弥补 SAT 在刚好接触时的精度损失)
     const margin = 2.0;
     const aRect = { l: a.x - margin, r: a.x + a.width + margin, t: a.y - margin, b: a.y + a.height + margin };
     const bRect = { l: b.x - margin, r: b.x + b.width + margin, t: b.y - margin, b: b.y + b.height + margin };
@@ -165,6 +174,7 @@ function isTouching(a: LayoutElement, b: LayoutElement): boolean {
     return overlapX >= 0 && overlapY >= 0;
 }
 
+// --- VALIDATION ---
 export function validateLayout(layout: ParkingLayout): ConstraintViolation[] {
   const violations: ConstraintViolation[] = [];
   if (!layout || !layout.elements) return violations;
@@ -172,16 +182,18 @@ export function validateLayout(layout: ParkingLayout): ConstraintViolation[] {
   const grid = new SpatialGrid(100);
   layout.elements.forEach(el => grid.add(el));
 
+  // 1. Check Out of Bounds
   layout.elements.forEach(el => {
     if (el.x < -EPSILON || el.x + el.width > layout.width + EPSILON || el.y < -EPSILON || el.y + el.height > layout.height + EPSILON) {
         violations.push({
             elementId: el.id,
             type: 'out_of_bounds',
-            message: `Element outside boundary.`
+            message: `Element is outside boundary.`
         });
     }
   });
 
+  // 2. Overlap Checks
   const solidTypes = new Set([
     ElementType.PARKING_SPACE, ElementType.PILLAR, ElementType.WALL, 
     ElementType.STAIRCASE, ElementType.ELEVATOR, ElementType.ROAD, ElementType.RAMP, ElementType.CHARGING_STATION,
@@ -192,9 +204,11 @@ export function validateLayout(layout: ParkingLayout): ConstraintViolation[] {
 
   solids.forEach(el1 => {
       const candidates = grid.getPotentialCollisions(el1);
+      
       candidates.forEach(el2 => {
           if (el1.id >= el2.id) return; 
 
+          // 基础排除逻辑
           if (el1.type === ElementType.PARKING_SPACE && (el2.type === ElementType.GROUND || el2.type === ElementType.CHARGING_STATION)) return;
           if (el2.type === ElementType.PARKING_SPACE && (el1.type === ElementType.GROUND || el1.type === ElementType.CHARGING_STATION)) return;
           if (el1.type === ElementType.WALL && el2.type === ElementType.WALL) return;
@@ -202,21 +216,23 @@ export function validateLayout(layout: ParkingLayout): ConstraintViolation[] {
           if ((el1.type === ElementType.WALL && (el2.type === ElementType.ENTRANCE || el2.type === ElementType.EXIT)) ||
               (el2.type === ElementType.WALL && (el1.type === ElementType.ENTRANCE || el1.type === ElementType.EXIT))) return;
 
+          // 核心修复：执行 EPSILON 过滤
           const box = getIntersectionBox(el1, el2);
           if (box) {
               violations.push({
                 elementId: el1.id, targetId: el2.id, type: 'overlap',
-                message: `${el1.type} overlaps with ${el2.type} (${Math.round(box.width)}x${Math.round(box.height)})`
+                message: `${el1.type} overlaps with ${el2.type} (Overlap: ${Math.round(box.width)}x${Math.round(box.height)})`
               });
           }
       });
   });
 
+  // 3. Placement Constraints
   const itemsOnRoad = new Set([ElementType.GUIDANCE_SIGN, ElementType.SIDEWALK, ElementType.SPEED_BUMP, ElementType.LANE_LINE]);
   layout.elements.forEach(item => {
       if (itemsOnRoad.has(item.type as ElementType)) {
           const nearbyRoads = grid.getPotentialCollisions(item).filter(c => c.type === ElementType.ROAD);
-          const isOnRoad = nearbyRoads.some(road => isOverlapping(road, item, 5));
+          const isOnRoad = nearbyRoads.some(road => isOverlapping(road, item, 5)); // 允许 5px 边缘余量
           if (!isOnRoad) {
              violations.push({
                elementId: item.id, type: 'placement_error',
@@ -226,6 +242,7 @@ export function validateLayout(layout: ParkingLayout): ConstraintViolation[] {
       }
   });
 
+  // 4. Connectivity
   const gates = layout.elements.filter(e => e.type === ElementType.ENTRANCE || e.type === ElementType.EXIT);
   const ramps = layout.elements.filter(e => e.type === ElementType.RAMP);
 

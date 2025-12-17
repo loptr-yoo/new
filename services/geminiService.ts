@@ -1,4 +1,4 @@
-import { GoogleGenAI } from "@google/genai";
+import { GoogleGenAI, Type } from "@google/genai";
 import { jsonrepair } from "jsonrepair";
 import { z } from "zod";
 import { ParkingLayout, ElementType, ConstraintViolation, LayoutElement } from "../types";
@@ -24,11 +24,21 @@ const LayoutElementSchema = z.object({
   l: z.string().optional()
 });
 
+const LayoutSchema = z.object({
+  reasoning_plan: z.string().optional(),
+  fix_strategy: z.array(z.string()).optional(),
+  width: z.union([z.number(), z.string()]).transform(Number).optional(),
+  height: z.union([z.number(), z.string()]).transform(Number).optional(),
+  elements: z.array(LayoutElementSchema).or(z.object({}).array()) 
+});
+
 let cachedTier: 'HIGH' | 'LOW' | null = null;
 
 const getApiKey = () => process.env.API_KEY;
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
+// --- HELPER: INCREMENTAL MERGE ---
+// Prevents AI "forgetting" elements during fix passes
 const mergeLayoutElements = (
   original: LayoutElement[], 
   updates: LayoutElement[]
@@ -48,6 +58,7 @@ const mergeLayoutElements = (
   return Array.from(elementMap.values());
 };
 
+// --- PIXEL ALIGNMENT & GAP REMOVAL ---
 const postProcessLayout = (layout: ParkingLayout): ParkingLayout => {
     return {
         ...layout,
@@ -71,6 +82,7 @@ const postProcessLayout = (layout: ParkingLayout): ParkingLayout => {
     };
 };
 
+// --- PRIORITY ARBITRATION: SIDEWALK > SPEED BUMP ---
 const resolvePriorityConflicts = (elements: LayoutElement[]): LayoutElement[] => {
     const sidewalks = elements.filter(e => e.type === ElementType.SIDEWALK);
     return elements.filter(el => {
@@ -85,6 +97,7 @@ const resolvePriorityConflicts = (elements: LayoutElement[]): LayoutElement[] =>
     });
 };
 
+// --- MANHATTAN ROUTING FOR SIGNS ---
 const orientGuidanceSigns = (layout: ParkingLayout): ParkingLayout => {
     const exits = layout.elements.filter(e => e.type === ElementType.EXIT);
     const roads = layout.elements.filter(e => e.type === ElementType.ROAD);
@@ -279,20 +292,29 @@ const runIterativeFix = async (
             
             const fixedLayout = mapToInternalLayout(rawData);
             
+            // --- SMART MERGE STRATEGY ---
+            // 1. Check count diff
             const countDiff = fixedLayout.elements.length - currentLayout.elements.length;
+            
+            // 2. Critical layer protection (detect if ground layer is dropped by AI)
             const originalGrounds = currentLayout.elements.filter(e => e.type === ElementType.GROUND).length;
             const newGrounds = fixedLayout.elements.filter(e => e.type === ElementType.GROUND).length;
-            const groundReduced = newGrounds < originalGrounds;
+            const groundLost = originalGrounds > 0 && newGrounds === 0;
 
+            // 3. Decision logic
+            // We use merge if:
+            // - We are in fallback model (less reliable)
+            // - Elements were significantly reduced (likely AI omission)
+            // - Structural 'ground' layer was lost
             const shouldUseMerge = 
                 model === MODEL_FALLBACK || 
                 countDiff < 0 || 
-                groundReduced;
+                groundLost;
 
             if (shouldUseMerge) {
                 const missingCount = currentLayout.elements.length - fixedLayout.elements.length;
-                if (missingCount > 0 || groundReduced) {
-                     onLog?.(`🛡️ Strict Merge Triggered: Ground dropped from ${originalGrounds} to ${newGrounds}. Preserving original elements.`);
+                if (missingCount > 0 || groundLost) {
+                     onLog?.(`🛡️ Safe Merge Triggered: Retaining missing elements (Diff: ${missingCount}, Ground Lost: ${groundLost}).`);
                 }
                 currentLayout = {
                     ...currentLayout,
@@ -301,8 +323,9 @@ const runIterativeFix = async (
             } else {
                 currentLayout = fixedLayout;
             }
-        } catch (e: any) {
-            onLog?.(`⚠️ Fix pass failed: ${e.message}. Skipping pass.`);
+            
+        } catch (e) {
+            onLog?.(`⚠️ Fix pass failed: ${(e as Error).message}. Skipping this pass.`);
         }
     }
     return currentLayout;
@@ -351,6 +374,7 @@ export const augmentLayoutWithRoads = async (currentLayout: ParkingLayout, onLog
     const rawData = cleanAndParseJSON(response.text);
     if (rawData.reasoning_plan && onLog) onLog(`✨ Refinement Plan: ${rawData.reasoning_plan}`);
 
+    // --- INCREMENTAL MERGE FOR REFINEMENT ---
     const aiGeneratedLayout = mapToInternalLayout(rawData);
     const newElements = aiGeneratedLayout.elements;
     onLog?.(`Adding ${newElements.length} detailed elements.`);
@@ -361,6 +385,7 @@ export const augmentLayoutWithRoads = async (currentLayout: ParkingLayout, onLog
         elements: [...currentLayout.elements, ...newElements]
     };
 
+    // --- POST-AI REFINEMENT ---
     onLog?.("⚖️ Resolving pedestrian/road conflicts...");
     layout.elements = resolvePriorityConflicts(layout.elements);
 
@@ -369,7 +394,7 @@ export const augmentLayoutWithRoads = async (currentLayout: ParkingLayout, onLog
     
     layout = await runIterativeFix(layout, ai, currentModel, onLog);
     return postProcessLayout(layout);
-  } catch (error: any) {
+  } catch (error) {
     throw error;
   }
 };
