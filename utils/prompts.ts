@@ -8,14 +8,15 @@ export const PROMPTS = {
   **CANVAS CONSTRAINTS**: Width: 800, Height: 600.
   
   **CRITICAL GEOMETRIC RULES**:
-  1. **The "Racetrack" Pattern**:
+  1. **CLOSED LOOP PERIMETER**: Walls MUST overlap or touch at corners (0,0), (800,0), (800,600), (0,600). DO NOT leave black gaps.
+  2. **The "Racetrack" Pattern**:
      - Create a main loop of 'driving_lane' (Roads).
      - **MANDATORY SETBACK**: The Road Loop must be **INSET** from the perimeter walls by approx **50-60 units**.
      - This gap allows for parking 'ground' strips between the wall and the road.
-  2. **'ground' Elements**:
+  3. **'ground' Elements**:
      - Grounds must be rectangular **STRIPS** (width/height ~50-100), NOT massive blocks.
      - Never generate a 'ground' thicker than 120 units.
-  3. **Boundary Snapping**:
+  4. **Boundary Snapping**:
      - 'entrance' and 'exit' MUST touch the edges of the 800x600 canvas.
 
   **REQUIRED ELEMENTS**:
@@ -25,21 +26,14 @@ export const PROMPTS = {
   - 'entrance' / 'exit': 40x20 blocks on boundary.
   - 'slope': 40x60 connectors joining Entrance/Exit to Roads.
 
-  **REASONING PLAN**:
-  1. Define 800x600 perimeter.
-  2. Draw inset road loop (Setback 60).
-  3. Place 'ground' strips between wall/road and in center.
-  4. Place Entrance/Exit on edges and connect via Slopes.
-
   **JSON EXAMPLE**:
   \`\`\`json
   {
-    "reasoning_plan": "Inset loop road with perimeter parking strips.",
+    "reasoning_plan": "Closed wall loop with inset racetrack driving lane.",
     "width": 800, "height": 600,
     "elements": [
       {"t": "wall", "x": 0, "y": 0, "w": 800, "h": 20},
-      {"t": "driving_lane", "x": 60, "y": 60, "w": 680, "h": 60},
-      {"t": "ground", "x": 20, "y": 20, "w": 760, "h": 40}
+      {"t": "driving_lane", "x": 60, "y": 60, "w": 680, "h": 60}
     ]
   }
   \`\`\`
@@ -54,19 +48,19 @@ export const PROMPTS = {
     - Existing Elements: 
     ${JSON.stringify(simplifiedLayout.elements)}
 
-    **CRITICAL STRATEGY: INCREMENTAL UPDATE**
-    - **DO NOT** return existing 'wall', 'driving_lane', 'ground', etc.
-    - Return **ONLY** the NEW elements you are creating.
-    - Your output will be merged onto the original layout by the system.
+    **CRITICAL SPATIAL AWARENESS**:
+    - The Input Data contains existing 'parking_space' and 'driving_lane'.
+    - **DO NOT** place 'pillar' or 'facility' inside a 'parking_space' or on a 'driving_lane'.
+    - If a specific x/y is occupied, shift the new element by 20 units.
+
+    **INCREMENTAL UPDATE**:
+    - Return **ONLY** the NEW elements you are creating. Existing walls/roads will be preserved.
 
     **GENERATION TASKS**:
-
     1. **Layer 1: Structural Grid ('pillar')**
-       - DO NOT create a grid. DO NOT fill areas.
-       - ONLY place 'pillar' (size 10x10) at the **corners** of 'parking_spot' rows or structural corners.
+       - Place 'pillar' (size 10x10) at corners of 'parking_spot' rows.
        - Max 1 pillar every 100 units. Sparsity is key.
-       - **CONSTRAINT**: Pillars must be **INSET by at least 5 units** from the ground edge to avoid overlapping roads.
-
+       - **CONSTRAINT**: Pillars must be INSET by 5 units from any edge.
     2. **Layer 2: Road Logic**
        - **'ground_line'**: Dashed lines (width 2) in the center of driving lanes. Skip intersections.
        - **'guidance_sign'**: (10x10) Place at T-junctions.

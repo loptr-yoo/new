@@ -54,7 +54,7 @@ class SpatialGrid {
 }
 
 // --- GEOMETRY UTILS ---
-const EPSILON = 1.5; // Tolerance: Overlaps smaller than 1.5px are treated as contact
+const EPSILON = 1.5;
 
 const cornerCache = new Map<string, {x: number, y: number}[]>();
 
@@ -114,7 +114,6 @@ function isPolygonsIntersecting(a: {x: number, y: number}[], b: {x: number, y: n
         if (projected > maxB) maxB = projected;
       }
 
-      // Allow 0.1px grace in projection to account for floating point errors
       if (maxA <= minB + 0.1 || maxB <= minA + 0.1) {
         return false;
       }
@@ -132,7 +131,6 @@ export function getIntersectionBox(r1: LayoutElement, r2: LayoutElement) {
     const width = x2 - x1;
     const height = y2 - y1;
 
-    // Report intersection only if overlap exceeds tolerance in both dimensions
     if (width > EPSILON && height > EPSILON) {
         return { x: x1, y: y1, width, height };
     }
@@ -157,7 +155,6 @@ function isTouching(a: LayoutElement, b: LayoutElement): boolean {
     
     if (isPolygonsIntersecting(aCorners, bCorners)) return true;
 
-    // Connectivity padding: items are "touching" if they are within 2px
     const margin = 2.0;
     const aRect = { l: a.x - margin, r: a.x + a.width + margin, t: a.y - margin, b: a.y + a.height + margin };
     const bRect = { l: b.x - margin, r: b.x + b.width + margin, t: b.y - margin, b: b.y + b.height + margin };
@@ -168,6 +165,14 @@ function isTouching(a: LayoutElement, b: LayoutElement): boolean {
     return overlapX >= 0 && overlapY >= 0;
 }
 
+// --- NEW HELPER: Coverage Check ---
+function isPointCovered(x: number, y: number, elements: LayoutElement[], padding = 10): boolean {
+    return elements.some(el => 
+        x >= el.x - padding && x <= el.x + el.width + padding &&
+        y >= el.y - padding && y <= el.y + el.height + padding
+    );
+}
+
 export function validateLayout(layout: ParkingLayout): ConstraintViolation[] {
   const violations: ConstraintViolation[] = [];
   if (!layout || !layout.elements) return violations;
@@ -175,16 +180,18 @@ export function validateLayout(layout: ParkingLayout): ConstraintViolation[] {
   const grid = new SpatialGrid(100);
   layout.elements.forEach(el => grid.add(el));
 
+  // 1. Out of Bounds
   layout.elements.forEach(el => {
     if (el.x < -EPSILON || el.x + el.width > layout.width + EPSILON || el.y < -EPSILON || el.y + el.height > layout.height + EPSILON) {
         violations.push({
             elementId: el.id,
             type: 'out_of_bounds',
-            message: `Element outside boundary.`
+            message: `Element is outside boundary.`
         });
     }
   });
 
+  // 2. Overlap Checks
   const solidTypes = new Set([
     ElementType.PARKING_SPACE, ElementType.PILLAR, ElementType.WALL, 
     ElementType.STAIRCASE, ElementType.ELEVATOR, ElementType.ROAD, ElementType.RAMP, ElementType.CHARGING_STATION,
@@ -198,7 +205,6 @@ export function validateLayout(layout: ParkingLayout): ConstraintViolation[] {
       candidates.forEach(el2 => {
           if (el1.id >= el2.id) return; 
 
-          // Allowed Containments
           if (el1.type === ElementType.PARKING_SPACE && (el2.type === ElementType.GROUND || el2.type === ElementType.CHARGING_STATION)) return;
           if (el2.type === ElementType.PARKING_SPACE && (el1.type === ElementType.GROUND || el1.type === ElementType.CHARGING_STATION)) return;
           if (el1.type === ElementType.WALL && el2.type === ElementType.WALL) return;
@@ -216,6 +222,7 @@ export function validateLayout(layout: ParkingLayout): ConstraintViolation[] {
       });
   });
 
+  // 3. Placement Constraints
   const itemsOnRoad = new Set([ElementType.GUIDANCE_SIGN, ElementType.SIDEWALK, ElementType.SPEED_BUMP, ElementType.LANE_LINE]);
   layout.elements.forEach(item => {
       if (itemsOnRoad.has(item.type as ElementType)) {
@@ -230,6 +237,7 @@ export function validateLayout(layout: ParkingLayout): ConstraintViolation[] {
       }
   });
 
+  // 4. Connectivity
   const gates = layout.elements.filter(e => e.type === ElementType.ENTRANCE || e.type === ElementType.EXIT);
   const ramps = layout.elements.filter(e => e.type === ElementType.RAMP);
 
@@ -252,6 +260,35 @@ export function validateLayout(layout: ParkingLayout): ConstraintViolation[] {
            });
       }
   });
+
+  // 5. Perimeter Integrity (Closing the "Black Holes")
+  const walls = layout.elements.filter(e => e.type === ElementType.WALL);
+  const corners = [
+      { x: 0, y: 0, label: "Top-Left" },
+      { x: layout.width, y: 0, label: "Top-Right" },
+      { x: layout.width, y: layout.height, label: "Bottom-Right" },
+      { x: 0, y: layout.height, label: "Bottom-Left" }
+  ];
+
+  corners.forEach(pt => {
+      if (!isPointCovered(pt.x, pt.y, walls, 12)) {
+          violations.push({
+              elementId: `wall_gap_${pt.label}`,
+              type: 'connectivity_error',
+              message: `CRITICAL: The perimeter is broken at the ${pt.label} corner (${pt.x}, ${pt.y}). Walls must overlap or touch to form a closed loop.`
+          });
+      }
+  });
+
+  // 6. Ground Coverage Check
+  const grounds = layout.elements.filter(e => e.type === ElementType.GROUND);
+  if (grounds.length === 0) {
+      violations.push({
+          elementId: 'global_ground_check',
+          type: 'placement_error',
+          message: `CRITICAL: No 'ground' elements found. Background islands must be preserved.`
+      });
+  }
 
   return violations;
 }
