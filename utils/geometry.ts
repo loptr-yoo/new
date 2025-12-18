@@ -131,7 +131,7 @@ export function getIntersectionBox(r1: LayoutElement, r2: LayoutElement) {
     const width = x2 - x1;
     const height = y2 - y1;
 
-    if (width > EPSILON && height > EPSILON) {
+    if (width > 0 && height > 0) {
         return { x: x1, y: y1, width, height };
     }
     return null;
@@ -201,25 +201,26 @@ export function validateLayout(layout: ParkingLayout): ConstraintViolation[] {
   
   const solids = layout.elements.filter(e => solidTypes.has(e.type as ElementType));
 
-  // ★★★ 核心修改：定义允许重叠的白名单 ★★★
-  // 格式为 "TypeA:TypeB"，必须按字母顺序排列 (例如 'a_type:b_type')
+  // Whitelist: Valid combinations of overlaps
   const allowedOverlaps = new Set([
-      // 1. 停车位相关 (User Rule: 停车位只与消防、充电桩、ground重合)
+      // Parking spots are on grounds, and can host charging/fire eq
       `${ElementType.CHARGING_STATION}:${ElementType.PARKING_SPACE}`,
       `${ElementType.FIRE_EXTINGUISHER}:${ElementType.PARKING_SPACE}`,
       `${ElementType.GROUND}:${ElementType.PARKING_SPACE}`,
       
-      // 2. 设施与地面的关系 (设施必须在地面上)
-      `${ElementType.CHARGING_STATION}:${ElementType.GROUND}`,
+      // Facilities on ground
       `${ElementType.CHARGING_STATION}:${ElementType.GROUND}`,
       `${ElementType.FIRE_EXTINGUISHER}:${ElementType.GROUND}`,
-      `${ElementType.PILLAR}:${ElementType.GROUND}`,
-      
-      // 3. 消除黑洞的关键：允许路和地、墙和地有微小重叠，防止裂缝
-      `${ElementType.GROUND}:${ElementType.ROAD}`, 
-      `${ElementType.GROUND}:${ElementType.WALL}`,
+      `${ElementType.FIRE_EXTINGUISHER}:${ElementType.WALL}`, 
 
-      // 4. 连接件逻辑
+      // Structural Support
+      `${ElementType.STAIRCASE}:${ElementType.GROUND}`,
+      `${ElementType.ELEVATOR}:${ElementType.GROUND}`,
+      `${ElementType.SAFE_EXIT}:${ElementType.GROUND}`,
+      `${ElementType.PILLAR}:${ElementType.GROUND}`,
+
+      // Adjacent connectivity
+      `${ElementType.GROUND}:${ElementType.ROAD}`, 
       `${ElementType.RAMP}:${ElementType.ROAD}`,
       `${ElementType.ENTRANCE}:${ElementType.RAMP}`,
       `${ElementType.EXIT}:${ElementType.RAMP}`,
@@ -227,30 +228,38 @@ export function validateLayout(layout: ParkingLayout): ConstraintViolation[] {
       `${ElementType.EXIT}:${ElementType.WALL}`,
   ]);
 
+  const itemsOnGround = new Set([ElementType.STAIRCASE, ElementType.ELEVATOR, ElementType.SAFE_EXIT, ElementType.PILLAR, ElementType.CHARGING_STATION, ElementType.FIRE_EXTINGUISHER]);
+
   solids.forEach(el1 => {
       const candidates = grid.getPotentialCollisions(el1);
       candidates.forEach(el2 => {
-          if (el1.id >= el2.id) return; // 避免重复检查 A vs B 和 B vs A
+          if (el1.id >= el2.id) return; 
 
-          // 生成排序后的 Key，确保顺序一致
           const types = [el1.type, el2.type].sort();
           const pairKey = `${types[0]}:${types[1]}`;
 
-          // ★ 检查白名单
           if (allowedOverlaps.has(pairKey)) return;
 
-          // 特殊逻辑：同类型允许轻微接触，但为了严谨通常也检查
           if (el1.type === el2.type && el1.type === ElementType.WALL) return;
           if (el1.type === el2.type && el1.type === ElementType.ROAD) return;
 
+          // Exclusive facility check
+          if (itemsOnGround.has(el1.type as ElementType) && itemsOnGround.has(el2.type as ElementType)) {
+               const box = getIntersectionBox(el1, el2);
+               if (box) {
+                   violations.push({
+                       elementId: el1.id, targetId: el2.id, type: 'overlap',
+                       message: `Facilities cannot overlap: ${el1.type} vs ${el2.type}`
+                   });
+               }
+          }
+
           const box = getIntersectionBox(el1, el2);
           if (box) {
-              // ★ 容差处理：忽略 < 1px 的浮点数误差重叠，防止 AI 误判
-              if (box.width < 0.5 && box.height < 0.5) return;
-
+              if (box.width < 1 || box.height < 1) return;
               violations.push({
                 elementId: el1.id, targetId: el2.id, type: 'overlap',
-                message: `❌ Illegal Overlap: ${el1.type} cannot overlap ${el2.type}`
+                message: `Overlap violation: ${el1.type} cannot overlap with ${el2.type}`
               });
           }
       });
@@ -258,6 +267,7 @@ export function validateLayout(layout: ParkingLayout): ConstraintViolation[] {
 
   // 3. Placement Constraints
   const itemsOnRoad = new Set([ElementType.GUIDANCE_SIGN, ElementType.SIDEWALK, ElementType.SPEED_BUMP, ElementType.LANE_LINE]);
+  
   layout.elements.forEach(item => {
       if (itemsOnRoad.has(item.type as ElementType)) {
           const nearbyRoads = grid.getPotentialCollisions(item).filter(c => c.type === ElementType.ROAD);
@@ -269,7 +279,48 @@ export function validateLayout(layout: ParkingLayout): ConstraintViolation[] {
              });
           }
       }
+
+      if (itemsOnGround.has(item.type as ElementType)) {
+          const nearbyGrounds = grid.getPotentialCollisions(item).filter(c => c.type === ElementType.GROUND);
+          const isSupported = nearbyGrounds.some(ground => {
+              const intersection = getIntersectionBox(item, ground);
+              if (!intersection) return false;
+              const itemArea = item.width * item.height;
+              const intersectArea = intersection.width * intersection.height;
+              return intersectArea > itemArea * 0.8;
+          });
+
+          if (!isSupported) {
+              violations.push({
+                  elementId: item.id, type: 'placement_error',
+                  message: `${item.type} must be placed on GROUND element.`
+              });
+          }
+      }
   });
+
+  // Intersection Clean-up Check
+  const roads = layout.elements.filter(e => e.type === ElementType.ROAD);
+  for (let i = 0; i < roads.length; i++) {
+      for (let j = i + 1; j < roads.length; j++) {
+          const r1 = roads[i];
+          const r2 = roads[j];
+          const intersection = getIntersectionBox(r1, r2);
+          if (intersection && intersection.width > 20 && intersection.height > 20) {
+              const dirtyTypes = new Set([ElementType.PARKING_SPACE, ElementType.LANE_LINE, ElementType.GUIDANCE_SIGN, ElementType.SPEED_BUMP]);
+              const debris = layout.elements.filter(el => 
+                  dirtyTypes.has(el.type as ElementType) && 
+                  isOverlapping({ x: intersection.x, y: intersection.y, width: intersection.width, height: intersection.height, id: 'temp', type: 'temp' } as any, el)
+              );
+              debris.forEach(d => {
+                  violations.push({
+                      elementId: d.id, type: 'placement_error',
+                      message: `Intersection must be clear. Remove ${d.type} from junction.`
+                  });
+              });
+          }
+      }
+  }
 
   // 4. Connectivity
   const gates = layout.elements.filter(e => e.type === ElementType.ENTRANCE || e.type === ElementType.EXIT);

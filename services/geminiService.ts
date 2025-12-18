@@ -63,7 +63,7 @@ const fillParkingAutomatically = (layout: ParkingLayout): ParkingLayout => {
                const cnt = Math.floor((ex - sx) / (SPOT_S + GAP)); 
                
                for(let i=0; i<cnt; i++) {
-                   const s = { x: sx + i*(SPOT_S+GAP), y: gr.t + 2, w: SPOT_S, h: SPOT_L };
+                   const s = { x: sx + i*(SPOT_S+GAP), y: gr.t + 1, w: SPOT_S, h: SPOT_L };
                    if (isSafe(s)) {
                        genSpots.push({ 
                            id: `p_auto_${++t}`, 
@@ -81,7 +81,7 @@ const fillParkingAutomatically = (layout: ParkingLayout): ParkingLayout => {
               const cnt = Math.floor((ex - sx) / (SPOT_S + GAP));
               
               for(let i=0; i<cnt; i++) {
-                   const s = { x: sx + i*(SPOT_S+GAP), y: gr.b - SPOT_L - 2, w: SPOT_S, h: SPOT_L };
+                   const s = { x: sx + i*(SPOT_S+GAP), y: gr.b - SPOT_L - 1, w: SPOT_S, h: SPOT_L };
                    if (isSafe(s)) {
                        genSpots.push({ 
                            id: `p_auto_${++t}`, 
@@ -99,7 +99,7 @@ const fillParkingAutomatically = (layout: ParkingLayout): ParkingLayout => {
               const cnt = Math.floor((ey - sy) / (SPOT_S + GAP));
 
               for(let i=0; i<cnt; i++) {
-                  const s = { x: gr.l + 2, y: sy + i*(SPOT_S+GAP), w: SPOT_L, h: SPOT_S };
+                  const s = { x: gr.l + 1, y: sy + i*(SPOT_S+GAP), w: SPOT_L, h: SPOT_S };
                   if (isSafe(s)) {
                       genSpots.push({
                           id: `p_auto_v_${++t}`,
@@ -117,7 +117,7 @@ const fillParkingAutomatically = (layout: ParkingLayout): ParkingLayout => {
               const cnt = Math.floor((ey - sy) / (SPOT_S + GAP));
 
               for(let i=0; i<cnt; i++) {
-                  const s = { x: gr.r - SPOT_L - 2, y: sy + i*(SPOT_S+GAP), w: SPOT_L, h: SPOT_S };
+                  const s = { x: gr.r - SPOT_L - 1, y: sy + i*(SPOT_S+GAP), w: SPOT_L, h: SPOT_S };
                   if (isSafe(s)) {
                       genSpots.push({
                           id: `p_auto_v_${++t}`,
@@ -134,64 +134,56 @@ const fillParkingAutomatically = (layout: ParkingLayout): ParkingLayout => {
   return { ...layout, elements: [...existingElements, ...genSpots] };
 };
 
-
 // --- ALGORITHM: CHARGING STATION GENERATOR ---
 const generateChargingStations = (layout: ParkingLayout): ParkingLayout => {
     const spots = layout.elements.filter(e => e.type === ElementType.PARKING_SPACE);
     const roads = layout.elements.filter(e => e.type === ElementType.ROAD);
     const stations: LayoutElement[] = [];
     
-    // 简单的排序，按行处理
     const sortedSpots = [...spots].sort((a, b) => {
-        if (Math.abs(a.y - b.y) < 10) return a.x - b.x;
+        if (Math.abs(a.y - b.y) < 10) return a.x - b.x; 
         return a.y - b.y;
     });
 
     let stationCount = 0;
     const STATION_SIZE = 10;
-    const OFFSET = 2; // ★ 关键：内缩 2px，确保充电桩在车位内部，不撞墙
+    const OFFSET = 2; // Offset inside the spot to avoid touching boundaries
 
     sortedSpots.forEach((spot, index) => {
-        // 每 3 个车位生成一个充电桩
+        // Place a station every 3 spots
         if ((index + 1) % 3 === 0) {
-            
-            // 1. 定义四个候选位置（全部在车位【内部】的边缘中心）
-            //    这样完全避免了 "左边右边" 或 "正中间" 的问题，只在首尾两端
+            // Find the furthest side from roads and place INSIDE the spot
             const candidates = [
-                // Top Edge (Inside, Centered)
+                // Top (Inside)
                 { x: spot.x + spot.width/2 - STATION_SIZE/2, y: spot.y + OFFSET, side: 'top' },
-                // Bottom Edge (Inside, Centered)
+                // Bottom (Inside)
                 { x: spot.x + spot.width/2 - STATION_SIZE/2, y: spot.y + spot.height - STATION_SIZE - OFFSET, side: 'bottom' },
-                // Left Edge (Inside, Centered)
+                // Left (Inside)
                 { x: spot.x + OFFSET, y: spot.y + spot.height/2 - STATION_SIZE/2, side: 'left' },
-                // Right Edge (Inside, Centered)
+                // Right (Inside)
                 { x: spot.x + spot.width - STATION_SIZE - OFFSET, y: spot.y + spot.height/2 - STATION_SIZE/2, side: 'right' }
             ];
 
             const isVerticalSpot = spot.height > spot.width;
             
-            // 2. 严格筛选：垂直车位只允许上下，水平车位只允许左右
-            const validCandidates = candidates.filter(c => {
+            // Filter candidates: vertical spots put stations top/bottom
+            let validCandidates = candidates.filter(c => {
                  if (isVerticalSpot) return c.side === 'top' || c.side === 'bottom';
                  return c.side === 'left' || c.side === 'right';
             });
 
-            // 3. 寻找离道路【最远】的候选点 (即“屁股”)
             let bestCandidate = validCandidates[0];
             let maxDistToRoad = -1;
 
             validCandidates.forEach(cand => {
                 let minDistToRoad = Infinity;
                 roads.forEach(r => {
-                    // 计算充电桩中心到道路中心的距离
                     const rcx = r.x + r.width / 2;
                     const rcy = r.y + r.height / 2;
-                    // 使用简单的欧几里得距离
                     const dist = Math.sqrt(Math.pow(cand.x - rcx, 2) + Math.pow(cand.y - rcy, 2));
                     if (dist < minDistToRoad) minDistToRoad = dist;
                 });
 
-                // 我们要找离路最远的那个点（Parking Butt）
                 if (minDistToRoad > maxDistToRoad) {
                     maxDistToRoad = minDistToRoad;
                     bestCandidate = cand;
@@ -218,6 +210,40 @@ const generateChargingStations = (layout: ParkingLayout): ParkingLayout => {
     };
 };
 
+const cleanIntersections = (layout: ParkingLayout): ParkingLayout => {
+    const roads = layout.elements.filter(e => e.type === ElementType.ROAD);
+    let elementsToRemove = new Set<string>();
+
+    for (let i = 0; i < roads.length; i++) {
+        for (let j = i + 1; j < roads.length; j++) {
+            const r1 = roads[i];
+            const r2 = roads[j];
+            const intersection = getIntersectionBox(r1, r2);
+
+            if (intersection && intersection.width > 20 && intersection.height > 20) {
+                const debris = layout.elements.filter(el => {
+                    if (elementsToRemove.has(el.id)) return false;
+                    const isDebrisType = [ElementType.LANE_LINE, ElementType.PARKING_SPACE, ElementType.SPEED_BUMP, ElementType.GUIDANCE_SIGN].includes(el.type as ElementType);
+                    if (!isDebrisType) return false;
+                    
+                    const cx = el.x + el.width / 2;
+                    const cy = el.y + el.height / 2;
+                    return cx > intersection.x && cx < intersection.x + intersection.width &&
+                           cy > intersection.y && cy < intersection.y + intersection.height;
+                });
+                debris.forEach(d => elementsToRemove.add(d.id));
+            }
+        }
+    }
+
+    if (elementsToRemove.size > 0) {
+        return {
+            ...layout,
+            elements: layout.elements.filter(e => !elementsToRemove.has(e.id))
+        };
+    }
+    return layout;
+};
 
 // --- SAFETY: CLEANUP INVALID ELEMENTS ---
 const cleanupPillars = (layout: ParkingLayout): ParkingLayout => {
@@ -233,7 +259,6 @@ const cleanupPillars = (layout: ParkingLayout): ParkingLayout => {
                 el.x < r.x + r.width && el.x + el.width > r.x &&
                 el.y < r.y + r.height && el.y + el.height > r.y
             );
-            // Pillars shouldn't be inside spots either, usually they are at the corners
             const isInsideSpot = spots.some(s => 
                 el.x > s.x + 2 && el.x + el.width < s.x + s.width - 2 &&
                 el.y > s.y + 2 && el.y + el.height < s.y + s.height - 2
@@ -349,7 +374,7 @@ async function determineModelTier(ai: GoogleGenAI, onLog?: (m: string) => void):
     if (cachedTier) return cachedTier;
     onLog?.("Checking model availability...");
     try {
-        await ai.models.generateContent({ model: MODEL_PRIMARY, contents: "test", config: { maxOutputTokens: 1 } });
+        await ai.models.generateContent({ model: MODEL_PRIMARY, contents: "test", config: { maxOutputTokens: 1, thinkingConfig: { thinkingBudget: 0 } } });
         cachedTier = 'HIGH';
         onLog?.("High Tier (3-Pro) detected.");
     } catch (e) {
@@ -572,13 +597,16 @@ export const augmentLayoutWithRoads = async (currentLayout: ParkingLayout, onLog
     onLog?.("📐 Running Algorithmic Spot Filler...");
     layout = fillParkingAutomatically(layout);
 
-    // --- NEW: Add Charging Stations ---
+    onLog?.("🧹 Cleaning up intersections...");
+    layout = cleanIntersections(layout);
+
     onLog?.("⚡ Placing Charging Stations...");
     layout = generateChargingStations(layout); 
-    // ----------------------------------
 
     onLog?.("🧹 Cleaning up illegal pillars...");
     layout = cleanupPillars(layout);
+
+    layout = cleanIntersections(layout);
 
     onLog?.("⚖️ Resolving pedestrian/road conflicts...");
     layout.elements = resolvePriorityConflicts(layout.elements);

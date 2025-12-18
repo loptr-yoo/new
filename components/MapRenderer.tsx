@@ -84,7 +84,7 @@ const MapRenderer = forwardRef<MapRendererHandle>((props, ref) => {
     svg.attr("viewBox", `0 0 ${width} ${height}`)
        .attr("width", "100%")
        .attr("height", "100%")
-       .style("shape-rendering", "crispEdges"); // Key fix for sub-pixel gaps
+       .style("shape-rendering", "crispEdges"); 
     
     const mainGroup = svg.append("g").attr("class", "main-group");
     
@@ -134,20 +134,82 @@ const MapRenderer = forwardRef<MapRendererHandle>((props, ref) => {
                .style("shape-rendering", "geometricPrecision"); 
         } 
         else if (d.type === ElementType.SIDEWALK) {
-            g.append("rect").attr("width", w).attr("height", h).attr("fill", style.fill);
-            const isVertical = h > w;
-            const stripeCount = 3;
-            if (isVertical) {
-                const stripeH = h / (stripeCount * 2 + 1);
-                for(let i=0; i<stripeCount; i++) {
-                    g.append("rect").attr("x", 0).attr("y", stripeH + i * 2 * stripeH).attr("width", w).attr("height", stripeH).attr("fill", "#cbd5e1");
+            g.append("rect").attr("width", w).attr("height", h).attr("fill", style.fill).attr("opacity", 0.3);
+            const isHorizontal = w > h;
+            const stripeSize = 4;
+            const gap = 4;
+            
+            if (isHorizontal) {
+                const count = Math.floor(w / (stripeSize + gap));
+                for(let i=0; i<count; i++) {
+                    g.append("rect")
+                        .attr("x", i * (stripeSize + gap))
+                        .attr("y", 0)
+                        .attr("width", stripeSize)
+                        .attr("height", h)
+                        .attr("fill", "#e2e8f0");
                 }
             } else {
-                const stripeW = w / (stripeCount * 2 + 1);
-                for(let i=0; i<stripeCount; i++) {
-                    g.append("rect").attr("x", stripeW + i * 2 * stripeW).attr("y", 0).attr("width", stripeW).attr("height", h).attr("fill", "#cbd5e1");
+                const count = Math.floor(h / (stripeSize + gap));
+                for(let i=0; i<count; i++) {
+                    g.append("rect")
+                        .attr("x", 0)
+                        .attr("y", i * (stripeSize + gap))
+                        .attr("width", w)
+                        .attr("height", stripeSize)
+                        .attr("fill", "#e2e8f0");
                 }
             }
+        }
+        else if (d.type === ElementType.SPEED_BUMP) {
+             // 🛡️ 健壮性修复：即时上下文纠错 (Just-in-Time Correction)
+             // 目的：即使上游给出的数据方向错误（如在横向道路上给了横向减速带），
+             //      渲染层也能强制将其修正为垂直于道路的状态。
+
+             // 1. 获取上下文：找到该减速带所在的"父道路"
+             // 利用闭包访问 layout.elements，通过简单的中心点包含检测
+             const cx = d.x + w / 2;
+             const cy = d.y + h / 2;
+             const parentRoad = layout?.elements.find(r => 
+                 r.type === ElementType.ROAD && 
+                 cx >= r.x && cx <= r.x + r.width &&
+                 cy >= r.y && cy <= r.y + r.height
+             );
+
+             // 2. 准备渲染参数
+             let renderW = w;
+             let renderH = h;
+             let offsetX = 0;
+             let offsetY = 0;
+
+             // 3. 逻辑校验与纠错
+             if (parentRoad) {
+                 const isRoadHorizontal = parentRoad.width > parentRoad.height;
+                 const isBumpHorizontal = w > h;
+
+                 // 核心规则：减速带必须"切断"道路（即方向应互相垂直）
+                 // 如果方向一致（例如都是横向），说明数据错了，必须强制旋转 90 度
+                 if (isRoadHorizontal === isBumpHorizontal) {
+                     // 交换宽高
+                     renderW = h;
+                     renderH = w;
+                     
+                     // 计算偏移量，确保旋转后中心点位置不变
+                     // 原中心(w/2, h/2)，新中心(renderW/2 + offX, renderH/2 + offY)
+                     offsetX = (w - renderW) / 2;
+                     offsetY = (h - renderH) / 2;
+                 }
+             }
+
+             // 4. 绘制修正后的矩形
+             g.append("rect")
+               .attr("x", offsetX)
+               .attr("y", offsetY)
+               .attr("width", renderW)
+               .attr("height", renderH)
+               .attr("fill", style.fill) // 严格跟随全局语义颜色
+               .attr("rx", 2);           // 微小圆角，提升精致感
+        
         }
         else if (d.type === ElementType.GUIDANCE_SIGN) {
             g.append("rect").attr("width", w).attr("height", h).attr("fill", style.fill).attr("rx", 2);
