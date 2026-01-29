@@ -1,5 +1,5 @@
 {
-  "name": "Copy of Copy of Semantic Parking Visualizer",
+  "name": "Semantic Parking Visualizer ai+算法",
   "description": "A semantic visualization tool for underground parking layouts using the highly reliable Gemini 3 Pro. Features automated spatial constraint checking, element classification (roads, ramps, spots), and AI-powered layout generation with strict logic enforcement.",
   "requestFramePermissions": []
 }

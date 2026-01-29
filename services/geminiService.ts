@@ -7,11 +7,15 @@ import { PROMPTS } from "../utils/prompts";
 
 const fallbackLayout: ParkingLayout = { width: 800, height: 600, elements: [] };
 
-const MODEL_PRIMARY = "gemini-3-pro-preview";
-const MODEL_FALLBACK = "gemini-2.5-pro"; 
+// Update model preference:
+// Primary: Gemini 2.0 Pro Experimental (Closest valid '2.x Pro' model)
+// Fallback: Gemini 3 Pro Preview
+const MODEL_PRIMARY = "gemini-2.5-pro";
+const MODEL_FALLBACK = "gemini-3-pro-preview"; 
 
 let cachedTier: 'HIGH' | 'LOW' | null = null;
 
+// API Key 必须从 process.env 获取，该变量会根据用户在对话框中的选择动态更新
 const getApiKey = () => process.env.API_KEY;
 const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
@@ -56,7 +60,6 @@ const fillParkingAutomatically = (layout: ParkingLayout): ParkingLayout => {
       grounds.forEach(g => {
           const gr = { l: g.x, r: g.x + g.width, t: g.y, b: g.y + g.height };
           
-          // Case A: Ground is below Road (Horizontal Road)
           if (Math.abs(rr.b - gr.t) < TOLERANCE && Math.min(rr.r, gr.r) > Math.max(rr.l, gr.l)) {
                const sx = Math.max(rr.l, gr.l) + BUFFER;
                const ex = Math.min(rr.r, gr.r) - BUFFER;
@@ -74,7 +77,6 @@ const fillParkingAutomatically = (layout: ParkingLayout): ParkingLayout => {
                    }
                }
           }
-          // Case B: Ground is above Road (Horizontal Road)
           else if (Math.abs(rr.t - gr.b) < TOLERANCE && Math.min(rr.r, gr.r) > Math.max(rr.l, gr.l)) {
               const sx = Math.max(rr.l, gr.l) + BUFFER;
               const ex = Math.min(rr.r, gr.r) - BUFFER;
@@ -92,7 +94,6 @@ const fillParkingAutomatically = (layout: ParkingLayout): ParkingLayout => {
                    }
               }
           }
-          // Case C: Ground is right of Road (Vertical Road)
           else if (Math.abs(rr.r - gr.l) < TOLERANCE && Math.min(rr.b, gr.b) > Math.max(rr.t, gr.t)) {
               const sy = Math.max(rr.t, gr.t) + BUFFER;
               const ey = Math.min(rr.b, gr.b) - BUFFER;
@@ -110,7 +111,6 @@ const fillParkingAutomatically = (layout: ParkingLayout): ParkingLayout => {
                   }
               }
           }
-          // Case D: Ground is left of Road (Vertical Road)
           else if (Math.abs(rr.l - gr.r) < TOLERANCE && Math.min(rr.b, gr.b) > Math.max(rr.t, gr.t)) {
               const sy = Math.max(rr.t, gr.t) + BUFFER;
               const ey = Math.min(rr.b, gr.b) - BUFFER;
@@ -147,26 +147,18 @@ const generateChargingStations = (layout: ParkingLayout): ParkingLayout => {
 
     let stationCount = 0;
     const STATION_SIZE = 10;
-    const OFFSET = 2; // Offset inside the spot to avoid touching boundaries
+    const OFFSET = 2;
 
     sortedSpots.forEach((spot, index) => {
-        // Place a station every 3 spots
         if ((index + 1) % 3 === 0) {
-            // Find the furthest side from roads and place INSIDE the spot
             const candidates = [
-                // Top (Inside)
                 { x: spot.x + spot.width/2 - STATION_SIZE/2, y: spot.y + OFFSET, side: 'top' },
-                // Bottom (Inside)
                 { x: spot.x + spot.width/2 - STATION_SIZE/2, y: spot.y + spot.height - STATION_SIZE - OFFSET, side: 'bottom' },
-                // Left (Inside)
                 { x: spot.x + OFFSET, y: spot.y + spot.height/2 - STATION_SIZE/2, side: 'left' },
-                // Right (Inside)
                 { x: spot.x + spot.width - STATION_SIZE - OFFSET, y: spot.y + spot.height/2 - STATION_SIZE/2, side: 'right' }
             ];
 
             const isVerticalSpot = spot.height > spot.width;
-            
-            // Filter candidates: vertical spots put stations top/bottom
             let validCandidates = candidates.filter(c => {
                  if (isVerticalSpot) return c.side === 'top' || c.side === 'bottom';
                  return c.side === 'left' || c.side === 'right';
@@ -204,10 +196,7 @@ const generateChargingStations = (layout: ParkingLayout): ParkingLayout => {
         }
     });
 
-    return {
-        ...layout,
-        elements: [...layout.elements, ...stations]
-    };
+    return { ...layout, elements: [...layout.elements, ...stations] };
 };
 
 const cleanIntersections = (layout: ParkingLayout): ParkingLayout => {
@@ -236,16 +225,9 @@ const cleanIntersections = (layout: ParkingLayout): ParkingLayout => {
         }
     }
 
-    if (elementsToRemove.size > 0) {
-        return {
-            ...layout,
-            elements: layout.elements.filter(e => !elementsToRemove.has(e.id))
-        };
-    }
-    return layout;
+    return elementsToRemove.size > 0 ? { ...layout, elements: layout.elements.filter(e => !elementsToRemove.has(e.id)) } : layout;
 };
 
-// --- SAFETY: CLEANUP INVALID ELEMENTS ---
 const cleanupPillars = (layout: ParkingLayout): ParkingLayout => {
     const roads = layout.elements.filter(e => e.type === ElementType.ROAD);
     const spots = layout.elements.filter(e => e.type === ElementType.PARKING_SPACE);
@@ -254,27 +236,15 @@ const cleanupPillars = (layout: ParkingLayout): ParkingLayout => {
         ...layout,
         elements: layout.elements.filter(el => {
             if (el.type !== ElementType.PILLAR) return true;
-            
-            const isOnRoad = roads.some(r => 
-                el.x < r.x + r.width && el.x + el.width > r.x &&
-                el.y < r.y + r.height && el.y + el.height > r.y
-            );
-            const isInsideSpot = spots.some(s => 
-                el.x > s.x + 2 && el.x + el.width < s.x + s.width - 2 &&
-                el.y > s.y + 2 && el.y + el.height < s.y + s.height - 2
-            );
-
+            const isOnRoad = roads.some(r => el.x < r.x + r.width && el.x + el.width > r.x && el.y < r.y + r.height && el.y + el.height > r.y);
+            const isInsideSpot = spots.some(s => el.x > s.x + 2 && el.x + el.width < s.x + s.width - 2 && el.y > s.y + 2 && el.y + el.height < s.y + s.height - 2);
             return !isOnRoad && !isInsideSpot;
         })
     };
 };
 
-const mergeLayoutElements = (
-  original: LayoutElement[], 
-  updates: LayoutElement[]
-): LayoutElement[] => {
+const mergeLayoutElements = (original: LayoutElement[], updates: LayoutElement[]): LayoutElement[] => {
   const elementMap = new Map(original.map(el => [el.id, el]));
-  
   updates.forEach(update => {
     if (update.id && elementMap.has(update.id)) {
       const existing = elementMap.get(update.id)!;
@@ -284,7 +254,6 @@ const mergeLayoutElements = (
       elementMap.set(newId, { ...update, id: newId });
     }
   });
-
   return Array.from(elementMap.values());
 };
 
@@ -292,21 +261,9 @@ const postProcessLayout = (layout: ParkingLayout): ParkingLayout => {
     return {
         ...layout,
         elements: layout.elements.map(el => {
-            const rx = Math.round(el.x);
-            const ry = Math.round(el.y);
-            const rw = Math.round(el.width);
-            const rh = Math.round(el.height);
-            
             const isStructural = [ElementType.ROAD, ElementType.GROUND, ElementType.WALL].includes(el.type as ElementType);
             const pad = isStructural ? 1 : 0;
-
-            return {
-                ...el,
-                x: rx,
-                y: ry,
-                width: rw + pad,
-                height: rh + pad
-            };
+            return { ...el, x: Math.round(el.x), y: Math.round(el.y), width: Math.round(el.width) + pad, height: Math.round(el.height) + pad };
         })
     };
 };
@@ -332,54 +289,42 @@ const orientGuidanceSigns = (layout: ParkingLayout): ParkingLayout => {
 
     const updated = layout.elements.map(el => {
         if (el.type === ElementType.GUIDANCE_SIGN) {
-            const parentRoad = roads.find(r => 
-                el.x >= r.x - 5 && el.x + el.width <= r.x + r.width + 5 &&
-                el.y >= r.y - 5 && el.y + el.height <= r.y + r.height + 5
-            );
-
+            const parentRoad = roads.find(r => el.x >= r.x - 5 && el.x + el.width <= r.x + r.width + 5 && el.y >= r.y - 5 && el.y + el.height <= r.y + r.height + 5);
             let nearestExit = exits[0], minDist = Infinity;
             const scx = el.x + el.width / 2;
             const scy = el.y + el.height / 2;
-
             exits.forEach(ex => {
                 const ecx = ex.x + ex.width / 2;
                 const ecy = ex.y + ex.height / 2;
                 const d = Math.abs(ecx - scx) + Math.abs(ecy - scy);
                 if (d < minDist) { minDist = d; nearestExit = ex; }
             });
-
             const ecx = nearestExit.x + nearestExit.width / 2;
             const ecy = nearestExit.y + nearestExit.height / 2;
-
             if (parentRoad) {
                 const isHorizontal = parentRoad.width > parentRoad.height;
-                if (isHorizontal) {
-                    return { ...el, rotation: ecx > scx ? 0 : 180 };
-                } else {
-                    return { ...el, rotation: ecy > scy ? 90 : 270 };
-                }
+                return { ...el, rotation: isHorizontal ? (ecx > scx ? 0 : 180) : (ecy > scy ? 90 : 270) };
             }
-            
             const dx = ecx - scx;
             const dy = ecy - scy;
-            if (Math.abs(dx) > Math.abs(dy)) return { ...el, rotation: dx > 0 ? 0 : 180 };
-            return { ...el, rotation: dy > 0 ? 90 : 270 };
+            return Math.abs(dx) > Math.abs(dy) ? { ...el, rotation: dx > 0 ? 0 : 180 } : { ...el, rotation: dy > 0 ? 90 : 270 };
         }
         return el;
     });
     return { ...layout, elements: updated };
 };
 
+// 动态获取模型层级
 async function determineModelTier(ai: GoogleGenAI, onLog?: (m: string) => void): Promise<'HIGH' | 'LOW'> {
     if (cachedTier) return cachedTier;
-    onLog?.("Checking model availability...");
+    onLog?.("Checking high-tier model availability...");
     try {
-        await ai.models.generateContent({ model: MODEL_PRIMARY, contents: "test", config: { maxOutputTokens: 1, thinkingConfig: { thinkingBudget: 0 } } });
+        await ai.models.generateContent({ model: MODEL_PRIMARY, contents: "test", config: { maxOutputTokens: 1 } });
         cachedTier = 'HIGH';
-        onLog?.("High Tier (3-Pro) detected.");
-    } catch (e) {
+        onLog?.("Gemini 2.0 Pro access confirmed.");
+    } catch (e: any) {
+        onLog?.(`Primary model unavailable (${e.message}). Switching to fallback.`);
         cachedTier = 'LOW';
-        onLog?.("Standard Tier detected.");
     }
     return cachedTier;
 }
@@ -394,23 +339,20 @@ const normalizeType = (t: string | undefined): string => {
     'pedestrian_path': ElementType.SIDEWALK, 'sidewalk': ElementType.SIDEWALK,
     'ground_line': ElementType.LANE_LINE, 'lane_line': ElementType.LANE_LINE,
     'parking_spot': ElementType.PARKING_SPACE, 'parking': ElementType.PARKING_SPACE,
-    'charging': ElementType.CHARGING_STATION,
-    'ground': ElementType.GROUND, 
-    'island': ElementType.GROUND,
-    'landscape': ElementType.GROUND,
-    'pillar': ElementType.PILLAR,
-    'staircase': ElementType.STAIRCASE,
+    'charging': ElementType.CHARGING_STATION, 'ground': ElementType.GROUND, 
+    'island': ElementType.GROUND, 'landscape': ElementType.GROUND, 'pillar': ElementType.PILLAR,
+    'ev_charging_zone': ElementType.CHARGING_STATION, // 修复粉色方块的关键
+    'charging_zone': ElementType.CHARGING_STATION,
+    'elevator_hall': ElementType.ELEVATOR,
     'elevator': ElementType.ELEVATOR,
-    'safe_exit': ElementType.SAFE_EXIT,
-    'fire_extinguisher': ElementType.FIRE_EXTINGUISHER,
-    'guidance_sign': ElementType.GUIDANCE_SIGN,
-    'parking_strip': ElementType.GROUND,
-    'central_island': ElementType.GROUND,
-    'green_zone': ElementType.GROUND,
-    'landscape_area': ElementType.GROUND,
-    'void': ElementType.GROUND, 
-    'buffer': ElementType.GROUND,
-    'median': ElementType.GROUND
+    'staircase': ElementType.STAIRCASE,
+    'stairs': ElementType.STAIRCASE,
+    'fire_stairs': ElementType.STAIRCASE,
+    'safe_exit': ElementType.SAFE_EXIT, 'fire_extinguisher': ElementType.FIRE_EXTINGUISHER,
+    'guidance_sign': ElementType.GUIDANCE_SIGN, 'parking_strip': ElementType.GROUND,
+    'central_island': ElementType.GROUND, 'green_zone': ElementType.GROUND,
+    'landscape_area': ElementType.GROUND, 'void': ElementType.GROUND, 
+    'buffer': ElementType.GROUND, 'median': ElementType.GROUND
   };
   return map[lower] || lower;
 };
@@ -422,10 +364,9 @@ const cleanAndParseJSON = (text: string): any => {
     const lastClose = cleanText.lastIndexOf('}');
     if (firstOpen !== -1 && lastClose !== -1) cleanText = cleanText.substring(firstOpen, lastClose + 1);
     const repaired = jsonrepair(cleanText);
-    const parsed = JSON.parse(repaired);
-    return parsed;
+    return JSON.parse(repaired);
   } catch (e) {
-    throw new Error(`Failed to parse AI response: ${(e as Error).message}`);
+    throw new Error(`AI 返回的数据格式有误: ${(e as Error).message}`);
   }
 };
 
@@ -458,20 +399,17 @@ const generateWithRetry = async (ai: GoogleGenAI, params: any, retries = 3) => {
         try {
             return await ai.models.generateContent(params);
         } catch (e: any) {
+            if (e.message?.includes("429") && i < retries - 1) {
+              await sleep(3000 * Math.pow(2, i));
+              continue;
+            }
             if (i === retries - 1) throw e;
-            await sleep(2000 * Math.pow(2, i));
         }
     }
     throw new Error("Failed after retries");
 };
 
-const runIterativeFix = async (
-    layout: ParkingLayout, 
-    ai: GoogleGenAI, 
-    model: string, 
-    onLog?: (m: string) => void,
-    maxPasses = 6
-): Promise<ParkingLayout> => {
+const runIterativeFix = async (layout: ParkingLayout, ai: GoogleGenAI, model: string, onLog?: (m: string) => void, maxPasses = 4): Promise<ParkingLayout> => {
     let currentLayout = layout;
     let lastScore = Infinity;
 
@@ -480,11 +418,11 @@ const runIterativeFix = async (
         const score = calculateScore(violations);
         
         if (score === 0) {
-            onLog?.(`🔧 Fix Pass ${pass}: Perfect (Score: 0).`);
+            onLog?.(`🔧 Pass ${pass}: 布局验证通过 (Score: 0).`);
             break;
         }
         if (score >= lastScore && pass > 1) {
-            onLog?.(`🌡️ Stagnation detected at Pass ${pass} (Score: ${score}). Stopping fix loop.`);
+            onLog?.(`🌡️ 迭代停滞于 Pass ${pass} (Score: ${score}).`);
             break;
         }
         
@@ -494,15 +432,7 @@ const runIterativeFix = async (
         const simplified = {
             width: currentLayout.width,
             height: currentLayout.height,
-            elements: currentLayout.elements.map(e => ({ 
-                id: e.id, 
-                t: e.type, 
-                x: Math.round(e.x), 
-                y: Math.round(e.y), 
-                w: Math.round(e.width), 
-                h: Math.round(e.height), 
-                r: e.rotation 
-            }))
+            elements: currentLayout.elements.map(e => ({ id: e.id, t: e.type, x: Math.round(e.x), y: Math.round(e.y), w: Math.round(e.width), h: Math.round(e.height), r: e.rotation }))
         };
 
         try {
@@ -513,29 +443,13 @@ const runIterativeFix = async (
             }, 1);
             
             const rawData = cleanAndParseJSON(response.text || "{}");
-            if (rawData.fix_strategy && onLog) {
-                rawData.fix_strategy.forEach((s: string) => onLog(`🤖 AI Action: ${s}`));
-            }
+            if (rawData.fix_strategy && onLog) rawData.fix_strategy.forEach((s: string) => onLog(`🤖 AI Action: ${s}`));
             
             const fixedLayout = mapToInternalLayout(rawData);
-            
-            const countDiff = fixedLayout.elements.length - currentLayout.elements.length;
-            const originalGroundCount = currentLayout.elements.filter(e => e.type === ElementType.GROUND).length;
-            const newGroundCount = fixedLayout.elements.filter(e => e.type === ElementType.GROUND).length;
-            const groundReduced = newGroundCount < originalGroundCount;
-
-            const shouldUseMerge = model === MODEL_FALLBACK || countDiff < 0 || groundReduced;
-
-            if (shouldUseMerge) {
-                currentLayout = {
-                    ...currentLayout,
-                    elements: mergeLayoutElements(currentLayout.elements, fixedLayout.elements)
-                };
-            } else {
-                currentLayout = fixedLayout;
-            }
+            currentLayout = { ...currentLayout, elements: mergeLayoutElements(currentLayout.elements, fixedLayout.elements) };
         } catch (e: any) {
-            onLog?.(`⚠️ Fix pass failed: ${e.message}. Skipping pass.`);
+            onLog?.(`⚠️ 修复失败: ${e.message}`);
+            break;
         }
     }
     return currentLayout;
@@ -543,21 +457,24 @@ const runIterativeFix = async (
 
 export const generateParkingLayout = async (description: string, onLog?: (msg: string) => void): Promise<ParkingLayout> => {
   const apiKey = getApiKey();
-  if (!apiKey) return fallbackLayout;
-  const ai = new GoogleGenAI({ apiKey });
+  if (!apiKey) throw new Error("缺少 API Key。请点击 Key 图标进行设置。");
   
+  const ai = new GoogleGenAI({ apiKey });
   let tier = await determineModelTier(ai, onLog);
   let currentModel = tier === 'HIGH' ? MODEL_PRIMARY : MODEL_FALLBACK;
   onLog?.(`Using model: ${currentModel}`);
 
   try {
-    const response = await generateWithRetry(ai, { model: currentModel, contents: PROMPTS.generation(description), config: { responseMimeType: "application/json" } }, 2);
+    const response = await generateWithRetry(ai, { 
+      model: currentModel, 
+      contents: PROMPTS.generation(description), 
+      config: { responseMimeType: "application/json" } 
+    }, 2);
+    
     const rawData = cleanAndParseJSON(response.text);
     if (rawData.reasoning_plan && onLog) onLog(`🧠 Plan: ${rawData.reasoning_plan}`);
     
     let layout = mapToInternalLayout(rawData);
-    onLog?.(`Generated ${layout.elements.length} structural elements.`);
-    
     layout = await runIterativeFix(layout, ai, currentModel, onLog);
     return postProcessLayout(layout);
   } catch (error: any) {
@@ -567,9 +484,9 @@ export const generateParkingLayout = async (description: string, onLog?: (msg: s
 
 export const augmentLayoutWithRoads = async (currentLayout: ParkingLayout, onLog?: (msg: string) => void): Promise<ParkingLayout> => {
   const apiKey = getApiKey();
-  if (!apiKey) throw new Error("API Key required");
-  const ai = new GoogleGenAI({ apiKey });
+  if (!apiKey) throw new Error("缺少 API Key");
   
+  const ai = new GoogleGenAI({ apiKey });
   let tier = await determineModelTier(ai, onLog);
   let currentModel = tier === 'HIGH' ? MODEL_PRIMARY : MODEL_FALLBACK;
 
@@ -585,33 +502,17 @@ export const augmentLayoutWithRoads = async (currentLayout: ParkingLayout, onLog
     if (rawData.reasoning_plan && onLog) onLog(`✨ AI Plan: ${rawData.reasoning_plan}`);
 
     const aiGeneratedLayout = mapToInternalLayout(rawData);
-    const newElements = aiGeneratedLayout.elements;
-    onLog?.(`AI suggested ${newElements.length} detailed elements.`);
+    let layout: ParkingLayout = { width: currentLayout.width, height: currentLayout.height, elements: [...currentLayout.elements, ...aiGeneratedLayout.elements] };
 
-    let layout: ParkingLayout = {
-        width: currentLayout.width,
-        height: currentLayout.height,
-        elements: [...currentLayout.elements, ...newElements]
-    };
-
-    onLog?.("📐 Running Algorithmic Spot Filler...");
+    onLog?.("📐 执行几何填充算法...");
     layout = fillParkingAutomatically(layout);
-
-    onLog?.("🧹 Cleaning up intersections...");
     layout = cleanIntersections(layout);
-
-    onLog?.("⚡ Placing Charging Stations...");
     layout = generateChargingStations(layout); 
-
-    onLog?.("🧹 Cleaning up illegal pillars...");
     layout = cleanupPillars(layout);
-
     layout = cleanIntersections(layout);
 
-    onLog?.("⚖️ Resolving pedestrian/road conflicts...");
+    onLog?.("⚖️ 处理冲突与标线校准...");
     layout.elements = resolvePriorityConflicts(layout.elements);
-
-    onLog?.("🧭 Snapping signs to orthogonal road directions...");
     layout = orientGuidanceSigns(layout);
     
     layout = await runIterativeFix(layout, ai, currentModel, onLog);
