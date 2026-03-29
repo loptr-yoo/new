@@ -6,8 +6,14 @@ export default defineConfig(({ mode }) => {
     const env = loadEnv(mode, '.', 'VITE_');
     return {
       server: {
-        port: 3000,
+        port: 5173,
         host: 'localhost',
+        proxy: {
+          '/api': {
+            target: 'http://localhost:8000',
+            changeOrigin: true,
+          }
+        }
       },
       plugins: [react()],
       resolve: {
