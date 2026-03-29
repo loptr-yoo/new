@@ -1087,3 +1087,5 @@ tests/fixtures/refinement_patch.json
 .trae/documents/building-single-scene-parity-plan.md
 .trae/documents/delta-generation-id-freeze-plan.md
 .trae/documents/llm-delta-id-freeze-hardening-plan.md
+.trae/documents/lift-and-shift-ts-to-python-phase1-plan.md
+.npm-cache/_cacache/content-v2/sha512/30/63/4a2b7e3096eb4129dad37f5e33fab7417f07484534fc3059498049af7def520bc43500550b094f13f882245a1c3c777be8259be8a777cc81679ac1f3da81
