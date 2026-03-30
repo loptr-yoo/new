@@ -1,0 +1,18 @@
+{
+  "include": ["backend"],
+  "exclude": [
+    "**/__pycache__",
+    "backend/.venv",
+    "**/.pytest_cache",
+    "**/.mypy_cache",
+    "**/.ruff_cache",
+    "frontend/node_modules",
+    "frontend/dist"
+  ],
+  "venvPath": "./backend",
+  "venv": ".venv",
+  "typeCheckingMode": "basic",
+  "pythonVersion": "3.9",
+  "reportMissingImports": true,
+  "reportMissingTypeStubs": false
+}
