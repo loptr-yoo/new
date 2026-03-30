@@ -9,6 +9,11 @@ export default defineConfig(({ mode }) => {
         port: 5173,
         host: 'localhost',
         proxy: {
+          '/api/generate/stream': {
+            target: 'http://localhost:8000',
+            changeOrigin: true,
+            ws: false
+          },
           '/api': {
             target: 'http://localhost:8000',
             changeOrigin: true,

@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
 
 from ..sse import sse_stream
@@ -11,6 +12,7 @@ from ...settings import settings
 
 from ...models import BuildingData, GenerateRequest
 
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -38,7 +40,7 @@ async def generate(req: GenerateRequest) -> BuildingData:
 
 
 @router.post("/generate/stream")
-async def generate_stream(req: GenerateRequest):
+async def generate_stream(req: GenerateRequest, request: Request):
     api_key = None
     if req.provider == "gemini":
         api_key = settings.gemini_api_key
@@ -70,9 +72,24 @@ async def generate_stream(req: GenerateRequest):
             )
             queue.put_nowait({"status": "done", "data": data.model_dump()})
         except Exception as e:
+            logger.exception("SSE crash in run task")
             queue.put_nowait({"status": "error", "message": str(e)})
         finally:
             queue.put_nowait(None)
 
     asyncio.create_task(run())
-    return StreamingResponse(sse_stream(queue), media_type="text/event-stream")
+
+    async def event_generator():
+        try:
+            async for chunk in sse_stream(queue):
+                if await request.is_disconnected():
+                    break
+                yield chunk
+        except Exception as e:
+            logger.exception("SSE crash")
+            yield f"data: {{\"status\": \"error\", \"message\": \"Internal Server Error\"}}\n\n"
+        finally:
+            yield "data: [DONE]\n\n"
+            return
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
