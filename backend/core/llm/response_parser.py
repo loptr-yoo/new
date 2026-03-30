@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import ast
+import importlib
 import json
 import re
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Literal, Optional
+from typing import Any, Callable, Dict, List, Literal, Optional
 
 
 Provider = Literal["gemini", "deepseek", "openai"]
@@ -12,7 +13,7 @@ Provider = Literal["gemini", "deepseek", "openai"]
 
 @dataclass(frozen=True)
 class ParseOptions:
-    provider: Provider
+    provider: str
     model: str
     strictMode: bool = False
 
@@ -69,8 +70,33 @@ def normalize_layout_element_types(layout: Any) -> Any:
     if not isinstance(elements, list):
         return layout
     out = dict(layout)
-    out["elements"] = [dict(el, type=TYPE_MAPPING.get(el.get("type"), el.get("type"))) if isinstance(el, dict) else el for el in elements]
+    out_elements: List[Any] = []
+    for el in elements:
+        if isinstance(el, dict):
+            t = el.get("type")
+            mapped = TYPE_MAPPING.get(t, t) if isinstance(t, str) else t
+            out_elements.append(dict(el, type=mapped))
+        else:
+            out_elements.append(el)
+    out["elements"] = out_elements
     return out
+
+
+def _repair_json_text(text: str) -> Optional[str]:
+    try:
+        mod = importlib.import_module("json_repair")
+        repair_fn = getattr(mod, "repair_json", None)
+        if callable(repair_fn):
+            res = repair_fn(text)
+            # 明确进行类型检查，向 Pylance 证明我们返回的必定是 str
+            if isinstance(res, str):
+                return res
+            # 如果由于某种原因它返回了 dict 等对象，我们将其转回 json 字符串
+            import json
+            return json.dumps(res) 
+        return None
+    except Exception:
+        return None
 
 
 def extract_json(text: str) -> str:
@@ -187,7 +213,21 @@ def safe_parse_response(
         except Exception:
             pass
 
-        parsed = parse_ai_response(text, options)
+        parsed: Any
+        try:
+            parsed = json.loads(text)
+        except json.JSONDecodeError:
+            if on_log:
+                on_log("⚠️ 原生 JSON 解析失败，尝试使用 json_repair 进行自动修复...")
+            try:
+                repaired_text = _repair_json_text(text)
+                if repaired_text is None:
+                    raise RuntimeError("json_repair unavailable")
+                parsed = json.loads(repaired_text)
+            except Exception:
+                parsed = parse_ai_response(text, options)
+        except Exception:
+            parsed = parse_ai_response(text, options)
         if on_log:
             on_log(f"[{options.provider}] 解析成功")
 
@@ -219,4 +259,3 @@ def safe_parse_response(
             else:
                 on_log(f"[{options.provider}] 完整响应: {text}")
         raise
-

@@ -293,6 +293,12 @@ def optimizeSystemPrompt(simplified_layout: Any, width: int, height: int, scene:
  {ROLES['OPTIMIZER']}
  {PROTOCOLS['PATCH_ONLY']}
  {refinement(simplified_layout, width, height, scene)}
+
+ CRITICAL WARNING REGARDING OUTPUT FORMAT:
+ Your output MUST be a perfectly valid, structurally sound JSON object.
+ 1. Double-check your brackets. EVERY array `[` must have a matching `]`. EVERY object `{{` must have a matching `}}`.
+ 2. DO NOT truncate the output under any circumstances.
+ 3. If the element list is becoming too long to fit in your context window, you MUST prioritize structural integrity over quantity. It is better to return fewer new_elements in a perfectly closed JSON than a large list in a broken JSON.
  """
 
 
@@ -330,4 +336,3 @@ PROMPTS: Dict[str, Any] = {
     "fixSystemPrompt": fixSystemPrompt,
     "fixPrompt": fixPrompt,
 }
-

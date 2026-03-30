@@ -203,7 +203,8 @@ async def run_iterative_fix(
             if isinstance(parsed, dict) and isinstance(parsed.get("modified_elements"), list):
                 patches = parsed.get("modified_elements") or []
                 deleted_ids = parsed.get("deleted_ids") or []
-                new_patches = parsed.get("new_elements") if isinstance(parsed.get("new_elements"), list) else []
+                raw_new = parsed.get("new_elements")
+                new_patches = list(raw_new) if isinstance(raw_new, list) else []
                 if on_log:
                     on_log(f"🔧 应用 {len(patches)} 个修复补丁，删除 {len(deleted_ids)} 个元素...")
             elif isinstance(parsed, dict) and isinstance(parsed.get("elements"), list):
@@ -396,7 +397,8 @@ async def execute_floor_generation_with_core(
                 ],
             )
         )
-        return apply_scene_post_process(with_slab, scene, on_log)
+        final_with_slab = post_process_layout(with_slab)
+        return apply_scene_post_process(final_with_slab, scene, on_log, core_elements=core_blueprint)
 
     fixed = await run_iterative_fix(
         floor_layout,
@@ -407,7 +409,8 @@ async def execute_floor_generation_with_core(
         {"freezeStructural": True, "frozenIds": frozen_ids},
     )
     fixed = fill_voids_with_ground(fixed)
-    return apply_scene_post_process(fixed, scene, on_log)
+    final_fixed = post_process_layout(fixed)
+    return apply_scene_post_process(final_fixed, scene, on_log, core_elements=core_blueprint)
 
 
 async def execute_generation(
@@ -464,11 +467,10 @@ async def execute_generation(
         raise last_error or RuntimeError("Unknown generation error")
 
     if not is_parking_scene:
-        return apply_scene_post_process(layout, scene, on_log)
+        return layout
 
     layout = await run_iterative_fix(layout, client, config, scene, on_log)
     layout = fill_voids_with_ground(layout)
-    layout = apply_scene_post_process(layout, scene, on_log)
     void_ratio = calculate_void_ratio(layout)
     if void_ratio > 0.005 and on_log:
         on_log(f"❌ Void ratio too high before refinement: {(void_ratio * 100):.3f}%")
@@ -602,7 +604,8 @@ async def execute_refinement(
             )
         if on_log:
             on_log("✅ 细化流程全部完成")
-        return post_process_layout(layout)
+        final_layout = post_process_layout(layout)
+        return apply_scene_post_process(final_layout, scene, on_log)
     except Exception as e:
         if on_log:
             on_log(f"❌ 细化阶段出错: {str(e)}")

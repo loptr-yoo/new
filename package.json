@@ -3,7 +3,7 @@
   "private": true,
   "scripts": {
     "dev:frontend": "cd frontend && npm run dev",
-    "dev:backend": "cd backend && .venv\\\\Scripts\\\\python -m uvicorn backend.main:app --reload --host 127.0.0.1 --port 8000",
+    "dev:backend": "backend\\.venv\\Scripts\\python -m uvicorn backend.main:app --reload --host 127.0.0.1 --port 8000",
     "dev": "npx concurrently \"npm run dev:frontend\" \"npm run dev:backend\""
   }
 }

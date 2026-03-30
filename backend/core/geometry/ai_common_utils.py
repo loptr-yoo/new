@@ -1014,8 +1014,13 @@ async def enhance_layout_with_geometry(layout: ParkingLayout, on_log: Optional[C
     return current
 
 
-def apply_scene_post_process(layout: ParkingLayout, scene: Any, on_log: Optional[Callable[[str], None]] = None) -> ParkingLayout:
-    processed = post_process_layout(layout)
+def apply_scene_post_process(
+    layout: ParkingLayout,
+    scene: Any,
+    on_log: Optional[Callable[[str], None]] = None,
+    core_elements: Optional[List[LayoutElement]] = None
+) -> ParkingLayout:
+    processed = layout
     algos = scene.postProcessAlgorithms if hasattr(scene, "postProcessAlgorithms") else None
     if isinstance(algos, list):
         for algo in algos:

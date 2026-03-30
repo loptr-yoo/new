@@ -11,9 +11,10 @@ interface Props {
   onDownload: () => void;
   onDownloadJson: () => void;
   onSelectKey: () => void;
+  onCancel?: () => void;
 }
 
-const LayoutControl: React.FC<Props> = ({ onGenerate, onRefine, onDownload, onDownloadJson, onSelectKey }) => {
+const LayoutControl: React.FC<Props> = ({ onGenerate, onRefine, onDownload, onDownloadJson, onSelectKey, onCancel }) => {
   const { isGenerating, violations, layout, logs, activeSceneId, switchScene } = useStore();
   const [prompt, setPrompt] = useState("Underground parking, rectangular, 2 main lanes, central islands.");
   const [showModelSelector, setShowModelSelector] = useState(false);
@@ -64,10 +65,17 @@ const LayoutControl: React.FC<Props> = ({ onGenerate, onRefine, onDownload, onDo
         />
         
         <div className="grid grid-cols-1 gap-3">
-            <button onClick={() => onGenerate(prompt, activeSceneId)} disabled={isGenerating}
-                className="w-full bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-sm font-bold py-3 rounded-lg flex items-center justify-center gap-2 shadow-lg shadow-blue-900/20 transition-all">
-                {isGenerating && !hasLayout ? <span className="animate-pulse">Analyzing...</span> : <><MapIcon size={16}/> Generate Layout</>}
-            </button>
+            {isGenerating ? (
+              <button onClick={onCancel}
+                  className="w-full bg-red-600/80 hover:bg-red-700 text-white text-sm font-bold py-3 rounded-lg flex items-center justify-center gap-2 shadow-lg shadow-red-900/20 transition-all">
+                  <span className="animate-pulse">Cancel Generation...</span>
+              </button>
+            ) : (
+              <button onClick={() => onGenerate(prompt, activeSceneId)} disabled={isGenerating}
+                  className="w-full bg-blue-600 hover:bg-blue-700 disabled:opacity-50 text-white text-sm font-bold py-3 rounded-lg flex items-center justify-center gap-2 shadow-lg shadow-blue-900/20 transition-all">
+                  <MapIcon size={16}/> Generate Layout
+              </button>
+            )}
             <button onClick={onRefine} disabled={isGenerating || !hasLayout}
                 className="w-full border-2 border-purple-500/50 text-purple-300 hover:bg-purple-900/20 disabled:opacity-30 text-sm font-bold py-3 rounded-lg flex items-center justify-center gap-2 transition-all">
                  <Sparkles size={16}/> Smart Refinement

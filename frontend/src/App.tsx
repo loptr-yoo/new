@@ -4,6 +4,7 @@ import MapRenderer, { MapRendererHandle } from './components/MapRenderer';
 import LayoutControl from './components/LayoutControl';
 import { generateBuilding, augmentLayout, getApiKeyFromEnv } from './services/aiService';
 import { useStore } from './store';
+import { useLLMStream } from './hooks/useLLMStream';
 
 // 声明 aistudio 全局接口
 // 🛡️ 修复：环境已将 window.aistudio 声明为 AIStudio 类型。
@@ -23,6 +24,7 @@ const App: React.FC = () => {
 
   const mapRef = useRef<MapRendererHandle>(null);
   const [hasKey, setHasKey] = useState<boolean>(true);
+  const { wrapStreamCall, cancel } = useLLMStream();
 
   useEffect(() => {
     const checkKey = async () => {
@@ -59,11 +61,13 @@ const App: React.FC = () => {
       setBuildingData(null);
       setActiveFloor('');
 
-      const newBuilding = await generateBuilding(prompt, {
-        provider: selectedProvider,
-        model: selectedModel,
-        apiKey,
-      }, addLog, sceneId);
+      const newBuilding = await wrapStreamCall((signal) => 
+        generateBuilding(prompt, {
+          provider: selectedProvider,
+          model: selectedModel,
+          apiKey,
+        }, addLog, sceneId, signal)
+      );
       
       setBuildingData(newBuilding);
       const floorIds = Object.keys(newBuilding.floors);
@@ -76,17 +80,10 @@ const App: React.FC = () => {
       setViolations([]); 
       addLog("Generation complete.");
     } catch (e: any) {
-      console.error(e);
-      const msg = e.message || "";
-      if (msg.includes("429") || msg.includes("quota") || msg.includes("rate_limit")) {
-        setError("API 配额已耗尽或请求过于频繁。请稍后重试。");
-      } else if (msg.includes("not found")) {
-        setError("无法找到指定的模型。请检查 API Key 和模型配置。");
-        setHasKey(false);
-      } else if (msg.includes("No API Key")) {
-        setError(msg);
+      if (e.isUserCanceled) {
+        addLog("已取消生成");
       } else {
-        setError(msg || "生成布局失败。");
+        setError(e.message || "生成布局失败。");
       }
     } finally {
       setIsGenerating(false);
@@ -107,11 +104,13 @@ const App: React.FC = () => {
       }
 
       addLog(`使用 ${selectedModel} 细化布局...`);
-      const augmented = await augmentLayout(layout, {
-        provider: selectedProvider,
-        model: selectedModel,
-        apiKey,
-      }, addLog, activeSceneId);
+      const augmented = await wrapStreamCall((signal) => 
+        augmentLayout(layout, {
+          provider: selectedProvider,
+          model: selectedModel,
+          apiKey,
+        }, addLog, activeSceneId, signal)
+      );
       
       if (augmented && augmented.elements.length > 0) {
         setLayout(augmented);
@@ -122,11 +121,10 @@ const App: React.FC = () => {
         addLog("Refinement complete.");
       }
     } catch (e: any) {
-      const msg = e.message || "";
-      if (msg.includes("429") || msg.includes("rate_limit")) {
-        setError("配额不足，细化操作失败。请稍后重试。");
+      if (e.isUserCanceled) {
+        addLog("已取消细化");
       } else {
-        setError(msg || "细化布局失败。");
+        setError(e.message || "细化布局失败。");
       }
     } finally {
       setIsGenerating(false);
@@ -226,6 +224,7 @@ const App: React.FC = () => {
         onDownload={handleDownload}
         onDownloadJson={handleDownloadJson}
         onSelectKey={handleSelectKey}
+        onCancel={cancel}
       />
     </div>
   );
