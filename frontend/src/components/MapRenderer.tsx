@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, forwardRef, useImperativeHandle } from 'react';
 import * as d3 from 'd3';
-import { ElementType, LayoutElement } from '../types';
+import { ElementType } from '../types';
 import { useStore } from '../store';
 import { DEFAULT_SCENE_ID, SCENE_REGISTRY } from '../utils/sceneRegistry';
 
@@ -47,7 +47,7 @@ const MapRenderer = forwardRef<MapRendererHandle>((props, ref) => {
 
       const serializer = new XMLSerializer();
       let svgString = serializer.serializeToString(svgNode);
-      if (!svgString.match(/^<svg[^>]+xmlns="http\:\/\/www\.w3\.org\/2000\/svg"/)) {
+      if (!svgString.match(/^<svg[^>]+xmlns="http:\/\/www\.w3\.org\/2000\/svg"/)) {
         svgString = svgString.replace(/^<svg/, '<svg xmlns="http://www.w3.org/2000/svg"');
       }
       

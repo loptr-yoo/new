@@ -14,19 +14,6 @@ type StreamEvent =
   | { status: 'done'; data: any }
   | { status: 'error'; message: string };
 
-const safeFetchJSON = async <T>(url: string, body: any): Promise<T> => {
-  const res = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) {
-    const txt = await res.text();
-    throw new Error(`API Error (${res.status}): ${txt}`);
-  }
-  return (await res.json()) as T;
-};
-
 const fetchSSE = async <T>(
   url: string,
   body: any,
@@ -191,7 +178,7 @@ export const augmentLayoutWithRoads = async (
 
 // --- 辅助函数保持不变 ---
 
-export const getApiKeyFromEnv = (provider: AIProvider): string => {
+export const getApiKeyFromEnv = (_provider: AIProvider): string => {
   return 'backend_env';
 };
 

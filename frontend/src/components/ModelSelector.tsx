@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { AVAILABLE_MODELS, AIProvider, getModelById, MODEL_BY_PROVIDER } from '../utils/aiConfig';
+import { AIProvider, getModelById, MODEL_BY_PROVIDER } from '../utils/aiConfig';
 import { useStore } from '../store';
 import { ChevronDown } from 'lucide-react';
 

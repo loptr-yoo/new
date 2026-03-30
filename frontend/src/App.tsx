@@ -18,7 +18,7 @@ declare global {
 
 const App: React.FC = () => {
   const { 
-    layout, buildingData, activeFloorId, violations, isGenerating, error, logs, selectedProvider, selectedModel, activeSceneId,
+    layout, buildingData, activeFloorId, error, selectedProvider, selectedModel, activeSceneId,
     setLayout, setBuildingData, setActiveFloor, updateFloorLayout, setViolations, setIsGenerating, setError, addLog, setGenerationTime, clearLogs 
   } = useStore();
 

@@ -9,6 +9,15 @@ from ..types import ElementType
 from .geometry import get_intersection_box, validate_layout
 
 
+def _float_or_none(v: Any) -> Optional[float]:
+    try:
+        if v is None:
+            return None
+        return float(v)
+    except Exception:
+        return None
+
+
 def subtract_rectangle(
     r1: Dict[str, float],
     r2: Dict[str, float],
@@ -127,20 +136,26 @@ def normalize_partial_patches(patches: Any) -> List[Dict[str, Any]]:
             except Exception:
                 pass
         if ("width" in p and p["width"] is not None) or ("w" in p and p["w"] is not None):
-            try:
-                q["width"] = float(p.get("width") if p.get("width") is not None else p.get("w"))
-            except Exception:
-                pass
+            v = p.get("width")
+            if v is None:
+                v = p.get("w")
+            fv = _float_or_none(v)
+            if fv is not None:
+                q["width"] = fv
         if ("height" in p and p["height"] is not None) or ("h" in p and p["h"] is not None):
-            try:
-                q["height"] = float(p.get("height") if p.get("height") is not None else p.get("h"))
-            except Exception:
-                pass
+            v = p.get("height")
+            if v is None:
+                v = p.get("h")
+            fv = _float_or_none(v)
+            if fv is not None:
+                q["height"] = fv
         if ("rotation" in p and p["rotation"] is not None) or ("r" in p and p["r"] is not None):
-            try:
-                q["rotation"] = float(p.get("rotation") if p.get("rotation") is not None else p.get("r"))
-            except Exception:
-                pass
+            v = p.get("rotation")
+            if v is None:
+                v = p.get("r")
+            fv = _float_or_none(v)
+            if fv is not None:
+                q["rotation"] = fv
         if "label" in p and p["label"] is not None:
             q["label"] = p["label"]
         elif "l" in p and p["l"] is not None:
@@ -170,26 +185,16 @@ def map_to_internal_layout(raw: Any) -> ParkingLayout:
             continue
         eid = str(e.get("id") or f"el_{format(int(time.time() * 1000), 'x')}_{len(els)}")
         t = normalize_type(e.get("type") or e.get("t"))
-        try:
-            x = float(e.get("x") or 0) or 0
-        except Exception:
-            x = 0
-        try:
-            y = float(e.get("y") or 0) or 0
-        except Exception:
-            y = 0
-        try:
-            w = float(e.get("width") if e.get("width") is not None else (e.get("w") if e.get("w") is not None else 10)) or 10
-        except Exception:
-            w = 10
-        try:
-            h = float(e.get("height") if e.get("height") is not None else (e.get("h") if e.get("h") is not None else 10)) or 10
-        except Exception:
-            h = 10
-        try:
-            r = float(e.get("rotation") if e.get("rotation") is not None else (e.get("r") if e.get("r") is not None else 0)) or 0
-        except Exception:
-            r = 0
+        x = _float_or_none(e.get("x"))
+        y = _float_or_none(e.get("y"))
+        w = _float_or_none(e.get("width") if e.get("width") is not None else (e.get("w") if e.get("w") is not None else 10))
+        h = _float_or_none(e.get("height") if e.get("height") is not None else (e.get("h") if e.get("h") is not None else 10))
+        r = _float_or_none(e.get("rotation") if e.get("rotation") is not None else (e.get("r") if e.get("r") is not None else 0))
+        x = 0.0 if x is None else x
+        y = 0.0 if y is None else y
+        w = 10.0 if w is None else w
+        h = 10.0 if h is None else h
+        r = 0.0 if r is None else r
         label = e.get("label") if e.get("label") is not None else e.get("l")
         els.append(LayoutElement(id=eid, type=t, x=x, y=y, width=w, height=h, rotation=r, label=label))
     return ParkingLayout(width=width, height=height, elements=els)
@@ -241,22 +246,24 @@ def merge_patches_to_layout(
             if mode == "allowCreate":
                 t_val = normalize_type(patch.get("type") if patch.get("type") is not None else patch.get("t"))
                 if t_val and patch.get("x") is not None and patch.get("y") is not None:
-                    try:
-                        x = float(patch.get("x"))
-                        y = float(patch.get("y"))
-                        w = float(patch.get("width") if patch.get("width") is not None else patch.get("w") or 10)
-                        h = float(patch.get("height") if patch.get("height") is not None else patch.get("h") or 10)
-                        r = float(patch.get("rotation") if patch.get("rotation") is not None else patch.get("r") or 0)
-                    except Exception:
+                    x = _float_or_none(patch.get("x"))
+                    y = _float_or_none(patch.get("y"))
+                    w = _float_or_none(patch.get("width") if patch.get("width") is not None else patch.get("w"))
+                    h = _float_or_none(patch.get("height") if patch.get("height") is not None else patch.get("h"))
+                    r = _float_or_none(patch.get("rotation") if patch.get("rotation") is not None else patch.get("r"))
+                    if x is None or y is None:
                         continue
+                    w = 10.0 if w is None else w
+                    h = 10.0 if h is None else h
+                    r = 0.0 if r is None else r
                     element_map[pid] = LayoutElement(
                         id=pid,
                         type=t_val,
-                        x=x,
-                        y=y,
-                        width=w,
-                        height=h,
-                        rotation=r,
+                        x=float(x),
+                        y=float(y),
+                        width=float(w),
+                        height=float(h),
+                        rotation=float(r),
                         label=patch.get("label") if patch.get("label") is not None else patch.get("l"),
                     )
             else:
@@ -268,22 +275,21 @@ def dedupe_patches_against_layout(layout: ParkingLayout, patches: Sequence[Dict[
     out: List[Dict[str, Any]] = []
     for patch in patches:
         t = normalize_type(patch.get("type") if patch.get("type") is not None else patch.get("t"))
-        try:
-            x = float(patch.get("x") or 0)
-            y = float(patch.get("y") or 0)
-            w = float(patch.get("width") if patch.get("width") is not None else (patch.get("w") if patch.get("w") is not None else 0))
-            h = float(patch.get("height") if patch.get("height") is not None else (patch.get("h") if patch.get("h") is not None else 0))
-        except Exception:
+        x = _float_or_none(patch.get("x"))
+        y = _float_or_none(patch.get("y"))
+        w = _float_or_none(patch.get("width") if patch.get("width") is not None else (patch.get("w") if patch.get("w") is not None else 0))
+        h = _float_or_none(patch.get("height") if patch.get("height") is not None else (patch.get("h") if patch.get("h") is not None else 0))
+        if x is None or y is None or w is None or h is None:
             out.append(patch)
             continue
         duplicate = False
         for el in layout.elements:
             if normalize_type(el.type) != t:
                 continue
-            near_pos = abs(el.x - x) <= tolerance and abs(el.y - y) <= tolerance
+            near_pos = abs(el.x - float(x)) <= tolerance and abs(el.y - float(y)) <= tolerance
             near_size = True
             if w and h:
-                near_size = abs(el.width - w) <= tolerance and abs(el.height - h) <= tolerance
+                near_size = abs(el.width - float(w)) <= tolerance and abs(el.height - float(h)) <= tolerance
             if near_pos and near_size:
                 duplicate = True
                 break
@@ -1018,7 +1024,7 @@ def apply_scene_post_process(
     layout: ParkingLayout,
     scene: Any,
     on_log: Optional[Callable[[str], None]] = None,
-    core_elements: Optional[List[LayoutElement]] = None
+    _core_elements: Optional[List[LayoutElement]] = None
 ) -> ParkingLayout:
     processed = layout
     algos = scene.postProcessAlgorithms if hasattr(scene, "postProcessAlgorithms") else None
@@ -1030,4 +1036,3 @@ def apply_scene_post_process(
                 if on_log:
                     on_log(f"⚠️ 后处理算法失败: {str(e)}")
     return processed
-

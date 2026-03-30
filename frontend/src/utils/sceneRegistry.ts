@@ -208,7 +208,7 @@ export const FloorPlanScene: SceneDefinition = {
     [ElementType.WINDOW]: { fill: '#7dd3fc', opacity: 0.8 },
   },
   customDrawers: {
-      [ElementType.STAIRCASE]: (g, element, style, context) => {
+      [ElementType.STAIRCASE]: (g, element, style, _context) => {
           const w = element.width;
           const h = element.height;
           const cx = w / 2;

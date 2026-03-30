@@ -398,7 +398,7 @@ async def execute_floor_generation_with_core(
             )
         )
         final_with_slab = post_process_layout(with_slab)
-        return apply_scene_post_process(final_with_slab, scene, on_log, core_elements=core_blueprint)
+        return apply_scene_post_process(final_with_slab, scene, on_log, _core_elements=core_blueprint)
 
     fixed = await run_iterative_fix(
         floor_layout,
@@ -410,7 +410,7 @@ async def execute_floor_generation_with_core(
     )
     fixed = fill_voids_with_ground(fixed)
     final_fixed = post_process_layout(fixed)
-    return apply_scene_post_process(final_fixed, scene, on_log, core_elements=core_blueprint)
+    return apply_scene_post_process(final_fixed, scene, on_log, _core_elements=core_blueprint)
 
 
 async def execute_generation(
