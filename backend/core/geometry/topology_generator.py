@@ -18,6 +18,11 @@ import shapely.ops as ops
 from ...models import FloorAllocation
 from .building_types import FloorSkeleton
 
+MIN_ROOM_AREA = 2.0        # 可用岛屿的最小有效面积（平方米，过滤噪点）
+MIN_CORRIDOR_WIDTH = 1.2   # 满足消防疏散的最小走廊宽度
+MAX_CORRIDOR_WIDTH = 4.0   # 避免走廊过度浪费的最大宽度
+CORRIDOR_SHRINK_TOLERANCE = 1e-6 # 容差值
+
 
 def _as_polygons(geom) -> List[Polygon]:
     if geom.is_empty:
@@ -138,19 +143,10 @@ def _shrink_to_fit(core: Polygon, boundary: Polygon) -> Polygon:
     if core.within(boundary.buffer(-eps)):
         return core
 
-    center = core.centroid
-    current_side = math.sqrt(core.area)
+    candidate = core
+    # 每次缩小 10%，最多尝试 30 次，使用 origin='center' 保证原地中心缩小
     for _ in range(30):
-        current_side *= 0.9
-        half = current_side / 2.0
-        candidate = Polygon(
-            [
-                (center.x - half, center.y - half),
-                (center.x + half, center.y - half),
-                (center.x + half, center.y + half),
-                (center.x - half, center.y + half),
-            ]
-        )
+        candidate = scale_geom(candidate, xfact=0.9, yfact=0.9, origin='center')
         candidate = _repair_polygon(candidate)
         if candidate.is_empty:
             continue
@@ -183,10 +179,10 @@ def _corridor_width_from_allowance(
     if length <= 1e-6:
         return 1.5
     width = corridor_allowance_area / length
-    if width < 1.2:
-        return 1.2
-    if width > 4.0:
-        return 4.0
+    if width < MIN_CORRIDOR_WIDTH:
+        return MIN_CORRIDOR_WIDTH
+    if width > MAX_CORRIDOR_WIDTH:
+        return MAX_CORRIDOR_WIDTH
     return float(width)
 
 
@@ -230,7 +226,7 @@ def _connect_core_to_corridor_if_needed(corridor, core: Polygon, width: float, b
     except Exception:
         return corridor
 
-
+#走廊膨胀+核心筒环路
 def generate_floor_skeleton(
     floor_data: FloorAllocation,
     outline_points: Optional[List[Tuple[float, float]]] = None,
@@ -258,9 +254,15 @@ def generate_floor_skeleton(
     h_line, v_line = _corridor_centerlines(boundary, anchor)
     width = _corridor_width_from_allowance(boundary, [h_line, v_line], float(floor_data.corridor_allowance_area))
 
+
     centerline = unary_union([h_line, v_line])
-    corridor = centerline.buffer(width / 2.0, cap_style="flat", join_style="mitre")
-    corridor = corridor.intersection(boundary)
+    cross_corridor = centerline.buffer(width / 2.0, cap_style='flat', join_style='mitre')
+    
+    core_ring = core.buffer(width, join_style='mitre')
+    
+    full_corridor = unary_union([cross_corridor, core_ring])
+
+    corridor = full_corridor.intersection(boundary)
     corridor = corridor.difference(core)
     corridor = _keep_components_connected_to_core(corridor, core)
     corridor = _connect_core_to_corridor_if_needed(corridor, core, width, boundary)
@@ -274,7 +276,7 @@ def generate_floor_skeleton(
     for p in _as_polygons(usable_area):
         if p.is_empty:
             continue
-        if p.area < 2.0:
+        if p.area < MIN_ROOM_AREA:
             continue
         if not p.intersects(corridor):
             continue
@@ -282,18 +284,11 @@ def generate_floor_skeleton(
 
     islands.sort(key=lambda p: p.area, reverse=True)
 
-    if isinstance(corridor, Polygon):
-        corridor_poly = corridor
-    elif isinstance(corridor, MultiPolygon):
-        corridor_poly = corridor
+    corridor_geom = unary_union(_as_polygons(corridor))
+    if isinstance(corridor_geom, (Polygon, MultiPolygon)):
+        corridor_poly = corridor_geom
     else:
-        corridor_poly = unary_union(_as_polygons(corridor))
-        if isinstance(corridor_poly, Polygon):
-            pass
-        elif isinstance(corridor_poly, MultiPolygon):
-            pass
-        else:
-            corridor_poly = MultiPolygon([])
+        corridor_poly = MultiPolygon() # 兜底机制
 
     return FloorSkeleton(
         boundary_polygon=boundary,
