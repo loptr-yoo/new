@@ -71,6 +71,88 @@ def _path_element(d: str, fill: str, stroke: str, stroke_width: float, fill_rule
     )
 
 
+def export_layout_svg(
+    boundary: Polygon,
+    cells,
+    seeds: List[Tuple[float, float]],
+    filepath: str,
+    title: str = "",
+) -> None:
+    """Export a power diagram layout to SVG for debug comparison.
+
+    Args:
+        boundary: Building boundary polygon.
+        cells: List of room cell geometries (Polygon/MultiPolygon/BaseGeometry).
+        seeds: List of (x, y) seed coordinates.
+        filepath: Output SVG path.
+        title: Optional title text rendered in the SVG.
+    """
+    all_polys: List[Polygon] = []
+    all_polys.extend(_as_polygons(boundary))
+    for g in cells:
+        all_polys.extend(_as_polygons(g))
+
+    minx, miny, maxx, maxy = _collect_bounds(all_polys)
+    w0 = maxx - minx
+    h0 = maxy - miny
+    if w0 <= 0:
+        w0 = 1.0
+    if h0 <= 0:
+        h0 = 1.0
+    pad = max(1.0, 0.03 * max(w0, h0))
+    minx -= pad
+    miny -= pad
+    maxx += pad
+    maxy += pad
+    width = maxx - minx
+    height = maxy - miny
+    translate_y = miny + maxy
+
+    palette = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728",
+               "#9467bd", "#8c564b", "#e377c2", "#7f7f7f"]
+
+    elems: List[str] = []
+
+    # Room cells (filled)
+    for i, geom in enumerate(cells):
+        color = palette[i % len(palette)]
+        for p in _as_polygons(geom):
+            d = _polygon_to_path(p)
+            if d:
+                elems.append(_path_element(d=d, fill=color, stroke="none", stroke_width=0.0))
+
+    # Boundary outline
+    for p in _as_polygons(boundary):
+        d = _polygon_to_path(p)
+        if d:
+            elems.append(_path_element(d=d, fill="none", stroke="#000000", stroke_width=0.6))
+
+    # Seed markers
+    for x, y in seeds:
+        elems.append(
+            f'<circle cx="{x:.3f}" cy="{y:.3f}" r="0.5" fill="#ff0000" />'
+        )
+
+    title_elem = ""
+    if title:
+        title_elem = f'  <text x="{minx + 1}" y="{miny + 2}" font-size="2" fill="#333">{title}</text>\n'
+
+    svg = (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="{minx:.3f} {miny:.3f} {width:.3f} {height:.3f}">\n'
+        f'  <rect x="{minx:.3f}" y="{miny:.3f}" width="{width:.3f}" height="{height:.3f}" fill="#ffffff" />\n'
+        f'{title_elem}'
+        f'  <g transform="translate(0,{translate_y:.3f}) scale(1,-1)" shape-rendering="crispEdges">\n'
+        f"    {' '.join(elems)}\n"
+        "  </g>\n"
+        "</svg>\n"
+    )
+
+    out_path = Path(filepath)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(svg, encoding="utf-8")
+
+
 def export_skeleton_to_svg(skeleton: FloorSkeleton, filepath: str) -> None:
     all_polys: List[Polygon] = []
     all_polys.extend(_as_polygons(skeleton.boundary_polygon))

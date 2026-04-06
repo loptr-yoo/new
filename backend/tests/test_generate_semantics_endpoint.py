@@ -1,4 +1,5 @@
 import pytest
+pytest.importorskip("fastapi")
 from httpx import ASGITransport, AsyncClient
 
 from backend.main import app
@@ -67,4 +68,3 @@ async def test_generate_semantics_floor_branch_passthrough(monkeypatch):
         data = resp.json()
         assert "floors" in data
         assert "building_name" not in data
-

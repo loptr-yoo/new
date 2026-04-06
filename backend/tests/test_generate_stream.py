@@ -1,4 +1,6 @@
 import pytest
+pytest.importorskip("fastapi")
+pytest.importorskip("anyio")
 from httpx import AsyncClient, ASGITransport
 import anyio
 

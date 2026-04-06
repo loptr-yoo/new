@@ -1,4 +1,5 @@
 {
+  "$schema": "./.vscode/package.schema.json",
   "name": "building-generator-root",
   "private": true,
   "scripts": {
