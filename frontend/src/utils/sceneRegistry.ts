@@ -1,4 +1,5 @@
 import { ElementType, SceneDefinition } from '../types';
+import { createFloorPlanSceneStyles, createParkingSceneStyles } from '../theme/buildingColorScheme';
 
 const floorPlanSystemPrompt = {
   rules: `
@@ -95,27 +96,7 @@ export const ParkingScene: SceneDefinition = {
   ]
 }`
   },
-  styles: {
-    [ElementType.GROUND]: { fill: '#334155', opacity: 1 },
-    [ElementType.ROAD]: { fill: '#1e293b', opacity: 1 },
-    [ElementType.PARKING_SPACE]: { fill: '#3b82f6', opacity: 1 },
-    [ElementType.SIDEWALK]: { fill: '#1e293b', opacity: 1 },
-    [ElementType.RAMP]: { fill: '#c026d3', opacity: 1 },
-    [ElementType.PILLAR]: { fill: '#94a3b8', opacity: 1, rx: 4 },
-    [ElementType.WALL]: { fill: '#f1f5f9', opacity: 1 },
-    [ElementType.ENTRANCE]: { fill: '#15803d', opacity: 1 },
-    [ElementType.EXIT]: { fill: '#b91c1c', opacity: 1 },
-    [ElementType.STAIRCASE]: { fill: '#b45309', opacity: 1 },
-    [ElementType.ELEVATOR]: { fill: '#06b6d4', opacity: 1 },
-    [ElementType.ELEVATOR_SHAFT]: { fill: '#991b1b', opacity: 1 },
-    [ElementType.CHARGING_STATION]: { fill: '#22c55e', opacity: 1 },
-    [ElementType.GUIDANCE_SIGN]: { fill: '#f59e0b', opacity: 1 },
-    [ElementType.SAFE_EXIT]: { fill: '#10b981', opacity: 1 },
-    [ElementType.SPEED_BUMP]: { fill: '#eab308', opacity: 1 },
-    [ElementType.FIRE_EXTINGUISHER]: { fill: '#ef4444', opacity: 1 },
-    [ElementType.LANE_LINE]: { fill: 'none', opacity: 1, stroke: '#facc15', strokeWidth: 1.5 },
-    [ElementType.CONVEX_MIRROR]: { fill: '#38bdf8', opacity: 1 }
-  },
+  styles: createParkingSceneStyles(),
   zOrder: parkingZOrder,
   elementNormalization: {
     column: ElementType.PILLAR,
@@ -179,34 +160,7 @@ export const FloorPlanScene: SceneDefinition = {
     requiredElements: ['exterior_wall', 'partition_wall', 'corridor', 'door', 'elevator_shaft'],
     exampleJSON: floorPlanExamples.complexLayout
   },
-  styles: {
-    [ElementType.SLAB]: { fill: '#1e293b', opacity: 0.15 },
-    [ElementType.ROAD]: { fill: '#1e293b', opacity: 1 },
-    [ElementType.WALL_EXTERNAL]: { fill: '#475569', opacity: 1 },
-    [ElementType.WALL_INTERNAL]: { fill: '#475569', opacity: 1 },
-    [ElementType.SHEAR_WALL]: { fill: '#475569', opacity: 1 },
-    [ElementType.PILLAR]: { fill: '#475569', opacity: 1 },
-    [ElementType.ELEVATOR_SHAFT]: { fill: '#991b1b', opacity: 1 },
-    [ElementType.STAIRCASE]: { fill: '#b45309', opacity: 1 },
-    [ElementType.ELEVATOR]: { fill: '#06b6d4', opacity: 1 },
-    [ElementType.SERVICE_SHAFT]: { fill: '#064e3b', opacity: 1 },
-    [ElementType.LIVING_ZONE]: { fill: '#1e293b', opacity: 0.15 },
-    [ElementType.BEDROOM_ZONE]: { fill: '#1e293b', opacity: 0.15 },
-    [ElementType.KITCHEN_ZONE]: { fill: '#1e293b', opacity: 0.15 },
-    [ElementType.BATHROOM_ZONE]: { fill: '#1e293b', opacity: 0.15 },
-    [ElementType.CORRIDOR]: { fill: '#1e293b', opacity: 0.15 },
-    [ElementType.STORAGE_ZONE]: { fill: '#1e293b', opacity: 0.15 },
-    'bed': { fill: '#4338ca', opacity: 1 },
-    'sofa': { fill: '#be123c', opacity: 1 },
-    'dining_table': { fill: '#78350f', opacity: 1 },
-    'desk': { fill: '#0e7490', opacity: 1 },
-    'wardrobe': { fill: '#6d28d9', opacity: 1 },
-    'toilet': { fill: '#f8fafc', opacity: 1 },
-    'sink': { fill: '#1d4ed8', opacity: 1 },
-    'cabinet': { fill: '#059669', opacity: 1 },
-    [ElementType.DOOR]: { fill: '#f8fafc', opacity: 1 },
-    [ElementType.WINDOW]: { fill: '#7dd3fc', opacity: 0.8 },
-  },
+  styles: createFloorPlanSceneStyles(),
   customDrawers: {
       [ElementType.STAIRCASE]: (g, element, style, _context) => {
           const w = element.width;
@@ -218,19 +172,66 @@ export const FloorPlanScene: SceneDefinition = {
           g.append("rect")
            .attr("width", w).attr("height", h)
            .attr("fill", style.fill)
-           .attr("opacity", style.opacity)
+           .attr("opacity", style.opacity ?? 1)
            .attr("stroke", "none");
 
           // Draw stair path
           g.append("path")
              .attr("d", w > h ? `M 10 ${cy} L ${w-10} ${cy} M ${w-20} ${cy-5} L ${w-10} ${cy} L ${w-20} ${cy+5}` : `M ${cx} 10 L ${cx} ${h-10} M ${cx-5} ${h-20} L ${cx} ${h-10} L ${cx+5} ${h-20}`)
-             .attr("stroke", "#ffffff").attr("fill", "none").attr("stroke-width", 1.5).attr("opacity", 0.4);
+             .attr("stroke", "#ffffff").attr("fill", "none").attr("stroke-width", 1.5).attr("opacity", 0.5);
       }
+  },
+  elementNormalization: {
+      // 卫生间变体
+      toilet: 'bathroom',
+      restroom: 'bathroom',
+      washroom: 'bathroom',
+      wc: 'bathroom',
+      // 办公变体
+      work_area: 'office',
+      workspace: 'office',
+      private_office: 'office',
+      // 会议变体
+      conference: 'conference_room',
+      meeting: 'meeting_room',
+      boardroom: 'conference_room',
+      // 休息/餐饮变体
+      break: 'break_room',
+      tea_room: 'break_room',
+      cafeteria: 'break_room',
+      lunchroom: 'break_room',
+      // 前台/入口变体
+      front_desk: 'reception',
+      entrance_hall: 'lobby',
+      foyer: 'lobby',
+      vestibule: 'lobby',
+      waiting_room: 'waiting_area',
+      // 储物变体
+      closet: 'storage',
+      store: 'storage',
+      archive: 'storage',
+      store_room: 'storage',
+      // 设备变体
+      utility_room: 'utility',
+      service_room: 'utility',
+      plant_room: 'utility',
+      mep_room: 'utility',
+      janitor: 'utility',
+      janitor_closet: 'utility',
+      // 走廊变体
+      hallway: 'corridor',
+      passage: 'corridor',
+      hall: 'corridor',
+      // 商业变体
+      store_front: 'retail',
   },
   zOrder: [
       ElementType.SLAB,
       ElementType.LIVING_ZONE, ElementType.BEDROOM_ZONE, ElementType.KITCHEN_ZONE, ElementType.BATHROOM_ZONE, ElementType.STORAGE_ZONE,
-      ElementType.CORRIDOR, 
+      'office', 'open_office', 'conference_room', 'meeting_room', 'reception', 'waiting_area',
+      'lounge', 'break_room', 'pantry', 'utility', 'server_room', 'electrical_room',
+      'retail', 'shop', 'food_court', 'kiosk',
+      ElementType.CORRIDOR,
       'cabinet', 'wardrobe', 'desk', 'dining_table', 'sofa', 'bed', 'toilet', 'sink',
       ElementType.SERVICE_SHAFT, ElementType.STAIRCASE, ElementType.ELEVATOR_SHAFT,
       ElementType.WALL_INTERNAL, ElementType.WALL_EXTERNAL, ElementType.SHEAR_WALL, ElementType.PILLAR,

@@ -5,29 +5,33 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "prebuild": "node scripts/validate-building-colors.mjs",
     "build": "vite build",
     "preview": "vite preview",
-    "lint": "eslint . --ext .ts,.tsx --max-warnings 0"
+    "lint": "eslint . --ext .ts,.tsx --max-warnings 0",
+    "test": "vitest run --passWithNoTests",
+    "colors:fix": "node scripts/validate-building-colors.mjs --fix"
   },
   "dependencies": {
     "@google/genai": "^1.30.0",
+    "d3": "^7.9.0",
+    "jsonrepair": "3.6.0",
+    "lucide-react": "^0.555.0",
     "react": "^19.2.3",
     "react-dom": "^19.2.3",
-    "lucide-react": "^0.555.0",
-    "d3": "^7.9.0",
-    "zustand": "4.5.2",
-    "jsonrepair": "3.6.0",
-    "zod": "3.22.4"
+    "zod": "3.22.4",
+    "zustand": "4.5.2"
   },
   "devDependencies": {
+    "@eslint/js": "^9.28.0",
     "@types/node": "^22.14.0",
     "@vitejs/plugin-react": "^5.0.0",
-    "@eslint/js": "^9.28.0",
     "eslint": "^9.28.0",
     "eslint-plugin-react-hooks": "^5.2.0",
     "eslint-plugin-react-refresh": "^0.4.20",
-    "typescript-eslint": "^8.33.1",
     "typescript": "~5.8.2",
-    "vite": "^6.2.0"
+    "typescript-eslint": "^8.33.1",
+    "vite": "^6.2.0",
+    "vitest": "^3.2.4"
   }
 }

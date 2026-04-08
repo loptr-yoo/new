@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>City GE - Color System v2</title>
+    <style>
+        :root { --bg:#f8fafc; --text:#334155; --muted:#64748b; --border:#e2e8f0; }
+        * { box-sizing:border-box; margin:0; padding:0; }
+        body { font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif; background:var(--bg); color:var(--text); padding:40px 20px; line-height:1.5; }
+        .container { max-width:1400px; margin:0 auto; }
+        h1 { font-size:26px; margin-bottom:6px; color:#0f172a; }
+        .subtitle { color:var(--muted); font-size:13px; margin-bottom:32px; }
+        h2 { font-size:18px; margin:36px 0 14px; padding-bottom:6px; border-bottom:2px solid var(--border); color:#0f172a; display:flex; align-items:center; gap:8px; }
+        h2 .badge { font-size:11px; font-weight:500; padding:2px 8px; border-radius:10px; background:#e0f2fe; color:#0369a1; }
+        .shared-note { font-size:12px; color:#0369a1; background:#eff6ff; border:1px solid #bfdbfe; border-radius:6px; padding:8px 14px; margin-bottom:16px; }
+        .grid { display:grid; grid-template-columns:repeat(auto-fill,minmax(240px,1fr)); gap:10px; }
+        .card { background:#fff; border:1px solid var(--border); border-radius:8px; padding:10px 14px; display:flex; align-items:center; gap:12px; box-shadow:0 1px 2px rgba(0,0,0,0.04); transition:transform .15s,box-shadow .15s; }
+        .card:hover { transform:translateY(-1px); box-shadow:0 3px 8px rgba(0,0,0,0.06); }
+        .card.shared { border-left:3px solid #3b82f6; }
+        .sw { width:40px; height:40px; border-radius:6px; flex-shrink:0; border:1px solid var(--border); }
+        .sw-stroke { width:40px; height:40px; border-radius:6px; flex-shrink:0; display:flex; align-items:center; justify-content:center; border:1px solid var(--border); }
+        .sw-stroke-inner { width:28px; height:28px; border-radius:3px; }
+        .info { flex:1; min-width:0; }
+        .name { font-weight:600; font-size:13px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+        .hex { font-size:11px; color:var(--muted); font-family:monospace; }
+        .tag { display:inline-block; font-size:9px; padding:1px 5px; border-radius:6px; margin-left:4px; font-weight:500; background:#dbeafe; color:#1e40af; }
+        .dark-preview { background:#020617; border-radius:10px; padding:16px; display:flex; gap:8px; flex-wrap:wrap; margin-bottom:14px; }
+        .chip { padding:4px 10px; border-radius:5px; font-size:11px; font-family:monospace; border:1px solid rgba(255,255,255,0.08); }
+        .toc { margin-bottom:28px; padding:14px; background:#f1f5f9; border-radius:8px; }
+        .toc ul { list-style:none; display:flex; flex-wrap:wrap; gap:6px 20px; }
+        .toc a { color:#2563eb; text-decoration:none; font-size:13px; }
+        .toc a:hover { text-decoration:underline; }
+        .section { margin-bottom:40px; }
+    </style>
+</head>
+<body>
+<div class="container">
+    <h1>Color System v2 — Per-Element</h1>
+    <p class="subtitle">
+        Each element has its own color. Shared elements across scenes are guaranteed identical.
+        Source: <code>buildingColorScheme.json v2.0.0</code> |
+        Fingerprint: <code>ff7c42dd...20b</code> |
+        Fallback: <code style="color:#FF00FF">#FF00FF</code>
+    </p>
+    <nav class="toc"><ul>
+        <li><a href="#parking">Parking Scene (19)</a></li>
+        <li><a href="#floor">Floor Plan Scene (44)</a></li>
+        <li><a href="#generic">Generic Scene (9)</a></li>
+        <li><a href="#fallback">MapRenderer Fallback (18)</a></li>
+    </ul></nav>
+
+    <!-- Parking -->
+    <div class="section" id="parking">
+        <h2>Parking Scene <span class="badge">parkingElementColors</span></h2>
+        <div class="shared-note">Blue left border = shared with Floor Plan (cross-scene color guaranteed by validate script)</div>
+        <div class="dark-preview" id="parking-preview"></div>
+        <div class="grid" id="parking-grid"></div>
+    </div>
+
+    <!-- Floor Plan -->
+    <div class="section" id="floor">
+        <h2>Floor Plan Scene <span class="badge">floorplanElementColors</span></h2>
+        <div class="shared-note">Blue left border = shared with Parking (cross-scene color guaranteed by validate script)</div>
+        <div class="dark-preview" id="floor-preview"></div>
+        <div class="grid" id="floor-grid"></div>
+    </div>
+
+    <!-- Generic -->
+    <div class="section" id="generic">
+        <h2>Generic Scene <span class="badge">hardcoded in sceneRegistry.ts</span></h2>
+        <div class="grid" id="generic-grid"></div>
+    </div>
+
+    <!-- Fallback -->
+    <div class="section" id="fallback">
+        <h2>MapRenderer Fallback <span class="badge">ELEMENT_STYLES in MapRenderer.tsx</span></h2>
+        <p style="color:var(--muted);font-size:12px;margin-bottom:12px">Background: <code>#020617</code></p>
+        <div class="grid" id="fallback-grid"></div>
+    </div>
+</div>
+
+<script>
+// ====== Data from buildingColorScheme.json v2.0.0 ======
+const shared = new Set(['pillar','staircase','elevator','elevator_shaft']);
+
+const parkingColors = {
+    ground:'#334155', wall:'#f1f5f9', pillar:'#94a3b8',
+    driving_lane:'#1e293b', pedestrian_path:'#475569', slope:'#c026d3',
+    entrance:'#15803d', exit:'#b91c1c', parking_space:'#3b82f6',
+    ground_line:'#facc15', deceleration_zone:'#eab308',
+    staircase:'#b45309', elevator:'#06b6d4', elevator_shaft:'#991b1b',
+    charging_station:'#22c55e', guidance_sign:'#f59e0b',
+    safe_exit:'#10b981', fire_extinguisher:'#ef4444', convex_mirror:'#38bdf8'
+};
+
+const floorColors = {
+    // Structure
+    floor_slab:'#1e293b', exterior_wall:'#475569', partition_wall:'#64748b',
+    shear_wall:'#475569', parapet:'#78716c', pillar:'#94a3b8',
+    window:'#a5b4fc', door:'#e2e8f0', fire_door:'#dc2626',
+    // Circulation
+    corridor:'#cbd5e1', lobby:'#9ca3af', aisle:'#a1a1aa', elevator_lobby:'#7dd3fc',
+    elevator_shaft:'#991b1b', staircase:'#b45309', elevator:'#06b6d4',
+    pipe_shaft:'#064e3b',
+    // Residential zones
+    kitchen:'#fb923c', bathroom:'#2dd4bf',
+    living_room:'#a78bfa', bedroom:'#818cf8', storage:'#a8a29e',
+    // Office / Commercial
+    office:'#60a5fa', open_office:'#93c5fd',
+    conference_room:'#c084fc', meeting_room:'#c084fc',
+    reception:'#fbbf24', waiting_area:'#fde68a',
+    lounge:'#d8b4fe', break_room:'#fdba74', pantry:'#fed7aa',
+    // Sanitary aliases
+    toilets:'#2dd4bf', restroom:'#2dd4bf',
+    // Utility / MEP
+    utility:'#78716c', server_room:'#71717a',
+    electrical_room:'#a1a1aa', mechanical_room:'#a8a29e', copy_room:'#9ca3af',
+    // Extensions
+    balcony:'#86efac', terrace:'#6ee7b7',
+    // Retail
+    retail:'#f472b6', shop:'#f472b6', food_court:'#fb923c', kiosk:'#fbbf24'
+};
+
+// From sceneRegistry.ts GenericScene.styles (hardcoded, not in JSON)
+const genericColors = [
+    { name:'floor',    fill:'#0b1220', opacity:1 },
+    { name:'wall',     fill:'#e2e8f0', opacity:1 },
+    { name:'road',     fill:'#1e293b', opacity:1 },
+    { name:'grass',    fill:'#166534', opacity:1 },
+    { name:'park',     fill:'#14532d', opacity:1 },
+    { name:'water',    fill:'#1d4ed8', opacity:0.9 },
+    { name:'building', fill:'#64748b', opacity:1 },
+    { name:'object',   fill:'#f59e0b', opacity:1 },
+    { name:'zone',     fill:'#7c3aed', opacity:0.6 },
+];
+
+// From MapRenderer.tsx ELEMENT_STYLES (fallback)
+const fallbackColors = [
+    { name:'GROUND (ground)',              fill:'#334155' },
+    { name:'ROAD (driving_lane)',          fill:'#1e293b' },
+    { name:'PARKING_SPACE',                fill:'#3b82f6' },
+    { name:'SIDEWALK (pedestrian_path)',   fill:'#1e293b' },
+    { name:'RAMP (slope)',                 fill:'#c026d3' },
+    { name:'PILLAR',                       fill:'#94a3b8' },
+    { name:'WALL',                         fill:'#f1f5f9' },
+    { name:'ENTRANCE',                     fill:'#15803d' },
+    { name:'EXIT',                         fill:'#b91c1c' },
+    { name:'STAIRCASE',                    fill:'#b45309' },
+    { name:'ELEVATOR',                     fill:'#06b6d4' },
+    { name:'CHARGING_STATION',             fill:'#22c55e' },
+    { name:'GUIDANCE_SIGN',                fill:'#f59e0b' },
+    { name:'SAFE_EXIT',                    fill:'#10b981' },
+    { name:'SPEED_BUMP (deceleration_zone)',fill:'#eab308' },
+    { name:'FIRE_EXTINGUISHER',            fill:'#ef4444' },
+    { name:'LANE_LINE (ground_line)',      fill:'none', stroke:'#facc15' },
+    { name:'CONVEX_MIRROR',                fill:'#38bdf8' },
+];
+
+// ====== Render helpers ======
+function isLight(hex) {
+    if (!hex || hex==='none') return true;
+    const c=hex.replace('#','');
+    const r=parseInt(c.substr(0,2),16),g=parseInt(c.substr(2,2),16),b=parseInt(c.substr(4,2),16);
+    return (r*299+g*587+b*114)/1000>160;
+}
+
+function perElementCard(name, hex, isShared, isStroke) {
+    const cls = isShared ? 'card shared' : 'card';
+    const tag = isShared ? '<span class="tag">shared</span>' : '';
+    let swatch;
+    if (isStroke) {
+        swatch = `<div class="sw-stroke"><div class="sw-stroke-inner" style="border:2px dashed ${hex};"></div></div>`;
+    } else {
+        swatch = `<div class="sw" style="background:${hex};"></div>`;
+    }
+    return `<div class="${cls}">${swatch}<div class="info"><div class="name">${name}${tag}</div><div class="hex">${hex}</div></div></div>`;
+}
+
+function simpleCard(item) {
+    const hex = item.stroke || item.fill;
+    const isStroke = item.fill === 'none';
+    let swatch;
+    if (isStroke) {
+        swatch = `<div class="sw-stroke"><div class="sw-stroke-inner" style="border:2px dashed ${hex};"></div></div>`;
+    } else {
+        swatch = `<div class="sw" style="background:${item.fill};opacity:${item.opacity??1};"></div>`;
+    }
+    let detail = `fill: ${item.fill}`;
+    if (item.opacity !== undefined && item.opacity !== 1) detail += ` op: ${item.opacity}`;
+    if (item.stroke) detail += ` stroke: ${item.stroke}`;
+    return `<div class="card">${swatch}<div class="info"><div class="name">${item.name}</div><div class="hex">${detail}</div></div></div>`;
+}
+
+function chips(colors) {
+    return Object.entries(colors).map(([k,c])=>{
+        const tc = isLight(c) ? '#0f172a' : '#f8fafc';
+        return `<div class="chip" style="background:${c};color:${tc};">${k}</div>`;
+    }).join('');
+}
+
+// ====== Mount ======
+document.getElementById('parking-preview').innerHTML = chips(parkingColors);
+document.getElementById('parking-grid').innerHTML =
+    Object.entries(parkingColors).map(([k,c]) => perElementCard(k, c, shared.has(k), k==='ground_line')).join('');
+
+document.getElementById('floor-preview').innerHTML = chips(floorColors);
+document.getElementById('floor-grid').innerHTML =
+    Object.entries(floorColors).map(([k,c]) => perElementCard(k, c, shared.has(k), false)).join('');
+
+document.getElementById('generic-grid').innerHTML = genericColors.map(simpleCard).join('');
+document.getElementById('fallback-grid').innerHTML = fallbackColors.map(simpleCard).join('');
+</script>
+</body>
+</html>

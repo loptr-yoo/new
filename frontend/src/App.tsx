@@ -185,7 +185,9 @@ const App: React.FC = () => {
                 <div className="absolute top-4 left-4 z-10 flex flex-wrap gap-2 bg-slate-900/80 p-2 rounded-lg border border-slate-700 backdrop-blur max-w-[80%]">
                     <span className="text-slate-400 text-xs flex items-center mr-2">楼层:</span>
                     {Object.keys(buildingData.floors).map(floorId => {
-                        const floorName = floorId.replace('floor_', '') + 'F';
+                        const floorName = floorId.startsWith('floor_')
+                          ? `${floorId.replace('floor_', '')}F`
+                          : floorId;
                         return (
                             <button
                                 key={floorId}

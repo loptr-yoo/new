@@ -3,6 +3,7 @@ import * as d3 from 'd3';
 import { ElementType } from '../types';
 import { useStore } from '../store';
 import { DEFAULT_SCENE_ID, SCENE_REGISTRY } from '../utils/sceneRegistry';
+import { FALLBACK_COLOR } from '../theme/buildingColorScheme';
 
 const ELEMENT_STYLES: Record<string, { fill: string; opacity: number; stroke?: string; strokeWidth?: number }> = {
   [ElementType.GROUND]: { fill: '#334155', opacity: 1 }, 
@@ -14,7 +15,7 @@ const ELEMENT_STYLES: Record<string, { fill: string; opacity: number; stroke?: s
   [ElementType.WALL]: { fill: '#f1f5f9', opacity: 1 },
   [ElementType.ENTRANCE]: { fill: '#15803d', opacity: 1 },
   [ElementType.EXIT]: { fill: '#b91c1c', opacity: 1 },
-  [ElementType.STAIRCASE]: { fill: '#fbbf24', opacity: 1 },
+  [ElementType.STAIRCASE]: { fill: '#b45309', opacity: 1 },
   [ElementType.ELEVATOR]: { fill: '#06b6d4', opacity: 1 },
   [ElementType.CHARGING_STATION]: { fill: '#22c55e', opacity: 1 },
   [ElementType.GUIDANCE_SIGN]: { fill: '#f59e0b', opacity: 1 },
@@ -24,6 +25,9 @@ const ELEMENT_STYLES: Record<string, { fill: string; opacity: number; stroke?: s
   [ElementType.LANE_LINE]: { fill: 'none', opacity: 1, stroke: '#facc15', strokeWidth: 1.5 },
   [ElementType.CONVEX_MIRROR]: { fill: '#38bdf8', opacity: 1 }
 };
+
+const BACKGROUND_COLOR = '#020617';
+const warnedMissingStyleTypes = new Set<string>();
 
 export interface MapRendererHandle {
   downloadJpg: () => void;
@@ -61,7 +65,7 @@ const MapRenderer = forwardRef<MapRendererHandle>((props, ref) => {
         const ctx = canvas.getContext("2d");
         if (ctx) {
           ctx.imageSmoothingEnabled = false; 
-          ctx.fillStyle = "#0f172a"; 
+          ctx.fillStyle = BACKGROUND_COLOR; 
           ctx.fillRect(0, 0, canvas.width, canvas.height);
           ctx.drawImage(img, 0, 0);
           const jpgUrl = canvas.toDataURL("image/jpeg", 0.98);
@@ -105,7 +109,8 @@ const MapRenderer = forwardRef<MapRendererHandle>((props, ref) => {
 
     const sceneKey = layout.sceneId || activeSceneId;
     const activeScene = SCENE_REGISTRY[sceneKey] || SCENE_REGISTRY[DEFAULT_SCENE_ID];
-    const sceneStyles = activeScene?.styles || ELEMENT_STYLES;
+    const baseStyles = (activeScene?.styles && Object.keys(activeScene.styles).length > 0) ? activeScene.styles : ELEMENT_STYLES;
+    const sceneStyles = baseStyles as any;
     
     const defaultZOrder = [
         ElementType.WALL, 
@@ -131,6 +136,12 @@ const MapRenderer = forwardRef<MapRendererHandle>((props, ref) => {
       return (idxA === -1 ? 999 : idxA) - (idxB === -1 ? 999 : idxB);
     });
 
+    mainGroup.append("rect")
+      .attr("x", 0).attr("y", 0)
+      .attr("width", width).attr("height", height)
+      .attr("fill", BACKGROUND_COLOR)
+      .attr("opacity", 1);
+
     mainGroup.selectAll("g.element")
       .data(sortedElements)
       .enter()
@@ -139,8 +150,17 @@ const MapRenderer = forwardRef<MapRendererHandle>((props, ref) => {
       .attr("transform", d => `translate(${d.x}, ${d.y})`)
       .each(function(this: any, d) {
         const g = d3.select(this);
-        const style = sceneStyles[d.type as string] || { fill: '#64748b', opacity: 0.6 };
-        const customDrawer = activeScene?.customDrawers?.[d.type as string];
+        const rawType = d.type as string;
+        const normalizedType = (activeScene?.elementNormalization?.[rawType] || rawType) as string;
+        const style = sceneStyles[normalizedType] || sceneStyles[rawType] || { fill: FALLBACK_COLOR, opacity: 1 };
+        if (import.meta.env?.DEV && !(sceneStyles[normalizedType] || sceneStyles[rawType])) {
+          const key = `${sceneKey}:${normalizedType}`;
+          if (!warnedMissingStyleTypes.has(key)) {
+            warnedMissingStyleTypes.add(key);
+            console.warn(`Missing style mapping for type "${normalizedType}" in scene "${sceneKey}". Using FALLBACK_COLOR.`);
+          }
+        }
+        const customDrawer = activeScene?.customDrawers?.[normalizedType] || activeScene?.customDrawers?.[rawType];
         const w = d.width;
         const h = d.height;
         const cx = w / 2;
@@ -151,49 +171,22 @@ const MapRenderer = forwardRef<MapRendererHandle>((props, ref) => {
           return;
         }
 
-        if (d.type === ElementType.LANE_LINE) {
+        if (normalizedType === ElementType.LANE_LINE) {
              const isVertical = h > w;
              g.append("line")
                .attr("x1", isVertical ? cx : 0).attr("y1", isVertical ? 0 : cy)
                .attr("x2", isVertical ? cx : w).attr("y2", isVertical ? h : cy)
-               .attr("stroke", style.stroke || "#facc15").attr("stroke-width", style.strokeWidth || 1.5).attr("stroke-dasharray", "8,8")
+               .attr("stroke", style.stroke || FALLBACK_COLOR).attr("stroke-width", style.strokeWidth || 1.5).attr("stroke-dasharray", "8,8")
+               .attr("stroke-opacity", style.opacity ?? 1)
                .style("shape-rendering", "geometricPrecision"); 
         } 
-        else if (d.type === ElementType.SIDEWALK) {
-            g.append("rect").attr("width", w).attr("height", h).attr("fill", style.fill).attr("opacity", 0.3);
-            const isHorizontal = w > h;
-            const stripeSize = 4;
-            const gap = 4;
-            
-            if (isHorizontal) {
-                const count = Math.floor(w / (stripeSize + gap));
-                for(let i=0; i<count; i++) {
-                    g.append("rect")
-                        .attr("x", i * (stripeSize + gap))
-                        .attr("y", 0)
-                        .attr("width", stripeSize)
-                        .attr("height", h)
-                        .attr("fill", "#e2e8f0");
-                }
-            } else {
-                const count = Math.floor(h / (stripeSize + gap));
-                for(let i=0; i<count; i++) {
-                    g.append("rect")
-                        .attr("x", 0)
-                        .attr("y", i * (stripeSize + gap))
-                        .attr("width", w)
-                        .attr("height", stripeSize)
-                        .attr("fill", "#e2e8f0");
-                }
-            }
+        else if (normalizedType === ElementType.SIDEWALK) {
+            g.append("rect")
+              .attr("width", w).attr("height", h)
+              .attr("fill", style.fill)
+              .attr("opacity", style.opacity ?? 1);
         }
-        else if (d.type === ElementType.SPEED_BUMP) {
-             // 🛡️ 健壮性修复：即时上下文纠错 (Just-in-Time Correction)
-             // 目的：即使上游给出的数据方向错误（如在横向道路上给了横向减速带），
-             //      渲染层也能强制将其修正为垂直于道路的状态。
-
-             // 1. 获取上下文：找到该减速带所在的"父道路"
-             // 利用闭包访问 layout.elements，通过简单的中心点包含检测
+        else if (normalizedType === ElementType.SPEED_BUMP) {
              const cx = d.x + w / 2;
              const cy = d.y + h / 2;
              const parentRoad = layout?.elements.find(r => 
@@ -201,49 +194,39 @@ const MapRenderer = forwardRef<MapRendererHandle>((props, ref) => {
                  cx >= r.x && cx <= r.x + r.width &&
                  cy >= r.y && cy <= r.y + r.height
              );
-
-             // 2. 准备渲染参数
+ 
              let renderW = w;
              let renderH = h;
              let offsetX = 0;
              let offsetY = 0;
-
-             // 3. 逻辑校验与纠错
+ 
              if (parentRoad) {
                  const isRoadHorizontal = parentRoad.width > parentRoad.height;
                  const isBumpHorizontal = w > h;
-
-                 // 核心规则：减速带必须"切断"道路（即方向应互相垂直）
-                 // 如果方向一致（例如都是横向），说明数据错了，必须强制旋转 90 度
                  if (isRoadHorizontal === isBumpHorizontal) {
-                     // 交换宽高
                      renderW = h;
                      renderH = w;
-                     
-                     // 计算偏移量，确保旋转后中心点位置不变
-                     // 原中心(w/2, h/2)，新中心(renderW/2 + offX, renderH/2 + offY)
                      offsetX = (w - renderW) / 2;
                      offsetY = (h - renderH) / 2;
                  }
              }
-
-             // 4. 绘制修正后的矩形
+ 
              g.append("rect")
                .attr("x", offsetX)
                .attr("y", offsetY)
                .attr("width", renderW)
                .attr("height", renderH)
-               .attr("fill", style.fill) // 严格跟随全局语义颜色
-               .attr("rx", 2);           // 微小圆角，提升精致感
-        
+               .attr("fill", style.fill)
+               .attr("opacity", style.opacity ?? 1)
+               .attr("rx", 2);
         }
-        else if (d.type === ElementType.GUIDANCE_SIGN) {
-            g.append("rect").attr("width", w).attr("height", h).attr("fill", style.fill).attr("rx", 2);
+        else if (normalizedType === ElementType.GUIDANCE_SIGN) {
+            g.append("rect").attr("width", w).attr("height", h).attr("fill", style.fill).attr("opacity", style.opacity ?? 1).attr("rx", 2);
             const s = Math.min(w, h) * 0.7;
             const rot = d.rotation || 0;
             g.append("path")
              .attr("d", `M ${cx - s/4} ${cy - s/2} L ${cx + s/2} ${cy} L ${cx - s/4} ${cy + s/2} M ${cx + s/2} ${cy} L ${cx - s/2} ${cy}`)
-             .attr("stroke", "white").attr("fill", "none").attr("stroke-width", 2)
+             .attr("stroke", "#ffffff").attr("fill", "none").attr("stroke-width", 2)
              .attr("stroke-linecap", "round").attr("stroke-linejoin", "round")
              .attr("transform", `rotate(${rot}, ${cx}, ${cy})`)
              .style("shape-rendering", "geometricPrecision");
@@ -252,7 +235,7 @@ const MapRenderer = forwardRef<MapRendererHandle>((props, ref) => {
             const rect = g.append("rect")
               .attr("width", w).attr("height", h)
               .attr("fill", style.fill)
-              .attr("opacity", style.opacity)
+              .attr("opacity", style.opacity ?? 1)
               .attr("transform", d.rotation ? `rotate(${d.rotation}, ${cx}, ${cy})` : null);
             if (d.type === ElementType.PILLAR) rect.attr("rx", 4);
         }

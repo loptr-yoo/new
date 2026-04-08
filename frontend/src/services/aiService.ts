@@ -1,5 +1,6 @@
 import { BuildingData, ParkingLayout } from '../types';
 import { AIProvider } from '../utils/aiConfig';
+import { sanitizeBuildingData, sanitizeLayout } from '../utils/sanitizeLayout';
 
 export interface AIServiceOptions {
   provider: AIProvider;
@@ -111,7 +112,7 @@ export const generateLayout = async (
   signal?: AbortSignal
 ): Promise<ParkingLayout> => {
   onProgress?.('请求后端生成布局...');
-  const data = await fetchSSE<BuildingData>(
+  const data = sanitizeBuildingData(await fetchSSE<BuildingData>(
     `/api/generate/stream`,
     {
       prompt,
@@ -121,10 +122,10 @@ export const generateLayout = async (
     },
     onProgress,
     signal
-  );
+  ));
   const firstFloor = Object.keys(data.floors || {})[0];
   if (!firstFloor) throw new Error('Empty floors in response.');
-  return data.floors[firstFloor];
+  return sanitizeLayout(data.floors[firstFloor]);
 };
 
 export const generateBuilding = async (
@@ -139,7 +140,7 @@ export const generateBuilding = async (
   } else {
     onProgress?.('请求后端生成基础布局...');
   }
-  return await fetchSSE<BuildingData>(
+  return sanitizeBuildingData(await fetchSSE<BuildingData>(
     `/api/generate/stream`,
     {
       prompt,
@@ -149,7 +150,7 @@ export const generateBuilding = async (
     },
     onProgress,
     signal
-  );
+  ));
 };
 
 /**
@@ -163,7 +164,7 @@ export const augmentLayoutWithRoads = async (
   signal?: AbortSignal
 ): Promise<ParkingLayout> => {
   onProgress?.('请求后端细化布局...');
-  return await fetchSSE<ParkingLayout>(
+  return sanitizeLayout(await fetchSSE<ParkingLayout>(
     `/api/augment/stream`,
     {
       layout,
@@ -173,7 +174,7 @@ export const augmentLayoutWithRoads = async (
     },
     onProgress,
     signal
-  );
+  ));
 };
 
 // --- 辅助函数保持不变 ---
