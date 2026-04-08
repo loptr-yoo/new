@@ -6,7 +6,7 @@ constraint_validator.py
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import numpy as np
 from shapely.geometry import Polygon
@@ -433,7 +433,7 @@ def validate_layout(
     island: Polygon,
     results: List[RoomResult],
     specs: List["SemanticRoomSpec"],
-    island_context: "IslandContext" = None,
+    island_context: Optional["IslandContext"] = None,
 ) -> SemanticValidationReport:
     """
     便捷函数：验证布局

@@ -40,21 +40,46 @@ JSON Schema（字段名必须完全一致）：
       "corridor_allowance_area": 1.0,
       "rooms": [
         {
-          "room_name": "string",
-          "room_type": "string",
-          "target_area": 1.0,
-          "requires_window": false,
-          "weight": 1,
-          "adjacency_tags": ["string"]
+          "room_id": "room_001",
+          "room_name": "客厅",
+          "room_type": "living_room",
+          "target_area": 25.0,
+          "zone": "public",
+          "needs_window": true,
+          "min_width": 3.5,
+          "aspect_ratio_range": [0.6, 1.8],
+          "adjacency_required": ["room_002"],
+          "adjacency_preferred": ["room_003"],
+          "adjacency_forbidden": [],
+          "weight": 5
         }
       ]
     }
   ]
 }
 
+【邻接约束填写规则】
+- adjacency_required: 功能上必须相邻的房间，如厨房-餐厅、主卧-主卫
+- adjacency_preferred: 最好相邻但非强制，如客厅-阳台
+- adjacency_forbidden: 禁止相邻的房间，如厨房-卧室、卫生间-餐厅
+- 使用 room_id 引用（不是 room_name）
+
+【zone 取值规则】
+- public: 客厅、餐厅、厨房、接待区等公共空间
+- private: 卧室、书房、卫生间等私密空间
+- service: 储藏室、设备间、杂物间等服务空间
+- circulation: 走廊、玄关、过道等交通空间
+
+【room_id 规则】
+- 每层内唯一，格式为 room_001, room_002, ...
+- 同层房间的 adjacency_required/preferred/forbidden 必须引用该层内的 room_id
+
 【细节约束】
-- weight 取值范围 1-10（整数）。
+- weight 取值范围 1-10（整数），越大越优先满足面积。
 - target_area / floor_total_area / overall_total_area 使用平方米（float）。
+- min_width: 房间最小开间（米），默认 2.5。
+- aspect_ratio_range: 房间宽高比范围 [min, max]，如 [0.6, 1.8]。
+- needs_window: 需要采光的房间设为 true（卧室、客厅、书房等通常需要）。
 - floors 数量必须与 total_floors 一致，并从 floor_number=1 连续递增。
 - 若用户未给出 total_floors，你需要根据场景合理推断，但必须保持 total_floors 与 floors 长度一致。
 - 若用户未给出 total_area，你需要合理估算 overall_total_area，并保证各层 floor_total_area 之和与 overall_total_area 一致（允许存在极小的数值误差，但应尽量精确）。

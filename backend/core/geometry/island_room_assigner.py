@@ -93,6 +93,38 @@ class IslandRoomAssigner:
         total_room_area = sum(r.target_area for r in self.rooms.values())
         total_island_area = sum(i.area for i in self.islands.values())
 
+        # 动态面积缩放
+        if total_room_area > total_island_area * 0.95:
+            # 房间面积超出岛屿容量，等比缩小
+            scale_factor = (total_island_area * 0.92) / total_room_area
+            logger.warning(
+                "Scaling down room areas by %.1f%% to fit islands "
+                "(rooms=%.1fm², islands=%.1fm²)",
+                (1 - scale_factor) * 100,
+                total_room_area,
+                total_island_area,
+            )
+            for room in self.rooms.values():
+                room.target_area *= scale_factor
+            total_room_area *= scale_factor
+
+        elif total_room_area < total_island_area * 0.7:
+            # 房间面积不足，等比放大以减少空白（上限 3x）
+            scale_factor = min(
+                (total_island_area * 0.85) / total_room_area,
+                3.0,  # 最多放大 3 倍
+            )
+            logger.info(
+                "Scaling up room areas by %.1f%% to fill islands "
+                "(rooms=%.1fm², islands=%.1fm²)",
+                (scale_factor - 1) * 100,
+                total_room_area,
+                total_island_area,
+            )
+            for room in self.rooms.values():
+                room.target_area *= scale_factor
+            total_room_area *= scale_factor
+
         if total_room_area > total_island_area * self.config.capacity_ratio:
             raise AssignmentError(
                 f"Insufficient island capacity: rooms need {total_room_area:.1f}m², "

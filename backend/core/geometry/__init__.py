@@ -53,6 +53,12 @@ from .island_room_assigner import (
     assign_rooms_to_islands,
 )
 
+# 多层编排器
+from .building_orchestrator import (
+    BuildingOrchestrator,
+    BuildingResult,
+)
+
 # 工具
 from .axis_align import snap_to_grid
 
@@ -103,6 +109,9 @@ __all__ = [
     "AssignmentError",
     "IslandRoomAssigner",
     "assign_rooms_to_islands",
+    # Building orchestrator
+    "BuildingOrchestrator",
+    "BuildingResult",
     # Tools
     "snap_to_grid",
 ]

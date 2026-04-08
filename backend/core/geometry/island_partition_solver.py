@@ -574,6 +574,9 @@ class SemanticIslandPartitionSolver:
         self.context = island_context
         self.config = config or SolverConfig()
 
+        # 走廊边信息
+        self.corridor_edges = island_context.corridor_edges if hasattr(island_context, 'corridor_edges') else []
+
         # 边界
         x_min, y_min, x_max, y_max = island_polygon.bounds
         self.x_min, self.y_min = x_min, y_min
@@ -876,6 +879,14 @@ class SemanticIslandPartitionSolver:
                 )
 
         # ═══════════════════════════════════════════════════════════
+        # 走廊可达性约束
+        # ═══════════════════════════════════════════════════════════
+        if self.corridor_edges:
+            self._add_corridor_accessibility_constraints(
+                model, x, y, x_end, y_end, W_s, D_s,
+            )
+
+        # ═══════════════════════════════════════════════════════════
         # 目标函数
         # ═══════════════════════════════════════════════════════════
 
@@ -1067,6 +1078,54 @@ class SemanticIslandPartitionSolver:
 
         model.Add(sep_L + sep_R + sep_F + sep_B >= 1)
 
+    def _add_corridor_accessibility_constraints(
+        self, model, x, y, x_end, y_end, W_s: int, D_s: int,
+    ):
+        """
+        走廊可达性约束：每个房间至少有一条边接触走廊侧
+
+        如果岛屿无走廊边（内岛），跳过约束。
+        """
+        if not self.corridor_edges:
+            logger.warning(
+                "Island has no corridor edges, skipping accessibility constraint. "
+                "Rooms may not be directly accessible."
+            )
+            return
+
+        TOUCH_THRESHOLD = 10  # 10cm = 可开门宽度（SCALE=100 时 10 个单位）
+
+        for i, room in enumerate(self.rooms):
+            touches_any_corridor = []
+
+            if "south" in self.corridor_edges:
+                touch_south = model.NewBoolVar(f"touch_south_{i}")
+                model.Add(y[i] <= TOUCH_THRESHOLD).OnlyEnforceIf(touch_south)
+                model.Add(y[i] > TOUCH_THRESHOLD).OnlyEnforceIf(touch_south.Not())
+                touches_any_corridor.append(touch_south)
+
+            if "north" in self.corridor_edges:
+                touch_north = model.NewBoolVar(f"touch_north_{i}")
+                model.Add(y_end[i] >= D_s - TOUCH_THRESHOLD).OnlyEnforceIf(touch_north)
+                model.Add(y_end[i] < D_s - TOUCH_THRESHOLD).OnlyEnforceIf(touch_north.Not())
+                touches_any_corridor.append(touch_north)
+
+            if "west" in self.corridor_edges:
+                touch_west = model.NewBoolVar(f"touch_west_{i}")
+                model.Add(x[i] <= TOUCH_THRESHOLD).OnlyEnforceIf(touch_west)
+                model.Add(x[i] > TOUCH_THRESHOLD).OnlyEnforceIf(touch_west.Not())
+                touches_any_corridor.append(touch_west)
+
+            if "east" in self.corridor_edges:
+                touch_east = model.NewBoolVar(f"touch_east_{i}")
+                model.Add(x_end[i] >= W_s - TOUCH_THRESHOLD).OnlyEnforceIf(touch_east)
+                model.Add(x_end[i] < W_s - TOUCH_THRESHOLD).OnlyEnforceIf(touch_east.Not())
+                touches_any_corridor.append(touch_east)
+
+            # 至少接触一个走廊边
+            if touches_any_corridor:
+                model.Add(sum(touches_any_corridor) >= 1)
+
     # ----------------------------------------------------------
     # 目标函数辅助方法
     # ----------------------------------------------------------
@@ -1256,6 +1315,7 @@ def partition_island_semantic(
     adjacency_graph: Dict[str, List[str]],
     exterior_walls: List[str],
     config: Optional[SolverConfig] = None,
+    corridor_edges: Optional[List[str]] = None,
 ) -> List[RoomResult]:
     """
     语义感知的岛屿房间划分便捷函数。
@@ -1266,11 +1326,15 @@ def partition_island_semantic(
         adjacency_graph: 邻接关系图 {room_id: [neighbor_ids]}
         exterior_walls: 外墙方向列表 ['north', 'south', 'east', 'west']
         config: 求解器配置
+        corridor_edges: 走廊接触边列表（用于可达性约束）
 
     Returns:
         房间划分结果列表
     """
-    context = IslandContext(exterior_walls=exterior_walls)
+    context = IslandContext(
+        exterior_walls=exterior_walls,
+        corridor_edges=corridor_edges or [],
+    )
     solver = SemanticIslandPartitionSolver(
         island_polygon=island_polygon,
         rooms=rooms,

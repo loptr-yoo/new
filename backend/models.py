@@ -101,16 +101,37 @@ class GenerateSemanticsRequest(BaseModel):
 class RoomAllocation(BaseModel):
     """
     Building 模式：单个房间/功能空间的目标配额。
+
+    新增语义字段（zone, needs_window, adjacency_required 等）以适配
+    SemanticRoomSpec 和 Treemap+MIQP 求解器。旧字段 requires_window /
+    adjacency_tags 保留做兼容。
     """
 
     model_config = ConfigDict(extra="forbid")
 
+    # 基础属性
+    room_id: str = Field(default="", description="唯一标识（LLM 生成，如 room_001）")
     room_name: str = Field(..., min_length=1, description="房间名称（人类可读）")
     room_type: str = Field(..., min_length=1, description="房间类型（用于后续管线识别/映射）")
     target_area: float = Field(..., gt=0, description="目标面积（平方米）")
-    requires_window: bool = Field(default=False, description="是否需要采光窗")
+
+    # 语义属性（新增）
+    zone: str = Field(default="public", description="功能分区: public|private|service|circulation")
+    needs_window: bool = Field(default=False, description="是否需要采光（外墙）")
+    min_width: float = Field(default=2.5, ge=0, description="最小开间（米）")
+    aspect_ratio_range: List[float] = Field(default=[0.5, 2.0], description="宽高比范围 [min, max]")
+
+    # 邻接约束（新增）
+    adjacency_required: List[str] = Field(default_factory=list, description="必须相邻的房间ID列表")
+    adjacency_preferred: List[str] = Field(default_factory=list, description="偏好相邻的房间ID列表")
+    adjacency_forbidden: List[str] = Field(default_factory=list, description="禁止相邻的房间ID列表")
+
+    # 优先级
     weight: int = Field(default=5, ge=1, le=10, description="优先级/权重（1-10）")
-    adjacency_tags: List[str] = Field(default_factory=list, description="邻接/分区标签（用于拓扑与空间切割）")
+
+    # 旧字段（兼容，deprecated）
+    requires_window: Optional[bool] = Field(default=None, description="[deprecated] 使用 needs_window")
+    adjacency_tags: List[str] = Field(default_factory=list, description="[deprecated] 使用 adjacency_required/preferred/forbidden")
 
 
 class FloorAllocation(BaseModel):

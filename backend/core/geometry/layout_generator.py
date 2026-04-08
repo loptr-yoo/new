@@ -14,7 +14,7 @@ from __future__ import annotations
 import logging
 import time
 from dataclasses import dataclass, field
-from typing import List, Tuple
+from typing import Any, List, Tuple, Union
 
 import numpy as np
 from shapely.geometry import Point, Polygon
@@ -94,7 +94,7 @@ class LayoutResult:
     total_area: float
     coverage: float
 
-    validation: ValidationReport
+    validation: Union[ValidationReport, SemanticValidationReport]
 
     generation_time_ms: float
 
@@ -270,7 +270,7 @@ class LayoutGenerator:
     def _compute_aspect_ratio(polygon: Polygon) -> float:
         if polygon.is_empty:
             return float("inf")
-        obb = Polygon(polygon.minimum_rotated_rectangle)
+        obb = polygon.minimum_rotated_rectangle
         coords = list(obb.exterior.coords)
         e1 = float(np.linalg.norm(np.array(coords[1]) - np.array(coords[0])))
         e2 = float(np.linalg.norm(np.array(coords[2]) - np.array(coords[1])))
@@ -322,9 +322,9 @@ def generate_layout_simple(
 def generate_layout_semantic(
     boundary: Polygon,
     room_specs: List[SemanticRoomSpec],
-    adjacency_graph: dict = None,
-    exterior_walls: list = None,
-    config: SolverConfig = None,
+    adjacency_graph: Optional[Dict[str, List[str]]] = None,
+    exterior_walls: Optional[List[str]] = None,
+    config: Optional[SolverConfig] = None,
     snap_grid: float = 0.1,
     verbose: bool = False,
 ) -> LayoutResult:
@@ -479,19 +479,19 @@ class PartitionError(LayoutGenerationError):
 class LayoutResultV2:
     """布局生成结果（V2 多岛屿版）"""
 
-    # 拓扑
-    core_tube: object  # CoreTube
-    corridors: list
-    islands: list
+    # 拓扑（使用 Any 避免循环导入，运行时为 CoreTube/Corridor/Island）
+    core_tube: "Any"
+    corridors: List["Any"]
+    islands: List["Any"]
 
     # 分配
-    assignments: dict
+    assignments: Dict[str, "Any"]
 
     # 布局
     room_layouts: List[RoomResult]
 
     # 验证
-    validation: SemanticValidationReport
+    validation: "Any"  # ValidationReport | SemanticValidationReport
 
     # 元数据
     generation_time_ms: float
@@ -540,6 +540,7 @@ def generate_layout_v2(
     config: Optional[SolverConfig] = None,
     snap_grid: float = 0.1,
     verbose: bool = False,
+    shared_core_tube: Optional[Any] = None,  # CoreTube, 跨层共享
 ) -> LayoutResultV2:
     """
     生成多岛屿布局（V2 API）
@@ -607,6 +608,7 @@ def generate_layout_v2(
             core_area_ratio=core_area_ratio,
             corridor_layout=corridor_layout,
             entrance_position=entrance_position,
+            core_tube_override=shared_core_tube,
         )
     except Exception as e:
         raise TopologyError(f"Failed to generate topology: {e}") from e
@@ -660,6 +662,7 @@ def generate_layout_v2(
         }
 
         exterior_walls = island.exterior_walls or []
+        corridor_edges = island.corridor_edges if hasattr(island, 'corridor_edges') else []
 
         try:
             miqp_results = partition_island_semantic(
@@ -668,6 +671,7 @@ def generate_layout_v2(
                 adjacency_graph=island_adjacency,
                 exterior_walls=exterior_walls,
                 config=config,
+                corridor_edges=corridor_edges,
             )
             all_miqp_results.extend(miqp_results)
             all_specs_ordered.extend(assignment.rooms)

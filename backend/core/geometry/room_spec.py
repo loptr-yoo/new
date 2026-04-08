@@ -91,6 +91,7 @@ class IslandContext:
     """
 
     exterior_walls: List[str] = field(default_factory=lambda: ["north", "south", "east", "west"])
+    corridor_edges: List[str] = field(default_factory=list)  # 哪些边接触走廊
     entrance_direction: Optional[str] = None
     preferred_public_side: Optional[str] = None
 
