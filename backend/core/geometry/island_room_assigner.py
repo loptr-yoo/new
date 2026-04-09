@@ -43,6 +43,16 @@ class AssignerConfig:
 
 
 @dataclass
+class DegradationSummary:
+    """降级摘要：记录分配过程中的所有降级操作"""
+    skipped_rooms: List[str] = field(default_factory=list)
+    force_shrunk: List[str] = field(default_factory=list)
+    miqp_fallback_floors: List[str] = field(default_factory=list)
+    adjacency_dropped: int = 0
+    parse_warnings: List[str] = field(default_factory=list)
+
+
+@dataclass
 class AssignmentResult:
     """分配结果"""
     island_id: str
@@ -79,91 +89,90 @@ class IslandRoomAssigner:
         self.assignments: Dict[str, List[str]] = defaultdict(list)
         self.room_to_island: Dict[str, str] = {}
 
-    def assign(self) -> Dict[str, AssignmentResult]:
+    def assign(self) -> Tuple[Dict[str, AssignmentResult], DegradationSummary]:
         """
-        执行分配
+        执行分配。永不抛 AssignmentError。
+
+        4 级降级策略：
+        1. 正常候选（硬约束过滤）
+        2. 放宽（任何有剩余容量的岛）
+        3. 强制分配（缩小面积，但有 min_area 下限）
+        4. 跳过 + warning
 
         返回:
-            {island_id: AssignmentResult}
-
-        Raises:
-            AssignmentError: 面积不足或房间无法分配
+            (assignments, degradation_summary)
         """
-        # 预检查：总面积
+        degradation = DegradationSummary()
+
         total_room_area = sum(r.target_area for r in self.rooms.values())
         total_island_area = sum(i.area for i in self.islands.values())
 
         # 动态面积缩放
+        if total_island_area <= 0:
+            # 0 岛屿：跳过所有房间
+            for room in self.rooms.values():
+                degradation.skipped_rooms.append(room.room_id)
+            logger.warning("No islands available, skipping all rooms")
+            return self._build_results(), degradation
+
         if total_room_area > total_island_area * 0.95:
-            # 房间面积超出岛屿容量，等比缩小
             scale_factor = (total_island_area * 0.92) / total_room_area
             logger.warning(
-                "Scaling down room areas by %.1f%% to fit islands "
-                "(rooms=%.1fm², islands=%.1fm²)",
-                (1 - scale_factor) * 100,
-                total_room_area,
-                total_island_area,
+                "Scaling down room areas by %.1f%% (rooms=%.1fm2, islands=%.1fm2)",
+                (1 - scale_factor) * 100, total_room_area, total_island_area,
             )
             for room in self.rooms.values():
                 room.target_area *= scale_factor
-            total_room_area *= scale_factor
-
         elif total_room_area < total_island_area * 0.7:
-            # 房间面积不足，等比放大以减少空白（上限 3x）
-            scale_factor = min(
-                (total_island_area * 0.85) / total_room_area,
-                3.0,  # 最多放大 3 倍
-            )
-            logger.info(
-                "Scaling up room areas by %.1f%% to fill islands "
-                "(rooms=%.1fm², islands=%.1fm²)",
-                (scale_factor - 1) * 100,
-                total_room_area,
-                total_island_area,
-            )
-            for room in self.rooms.values():
-                room.target_area *= scale_factor
-            total_room_area *= scale_factor
+            max_island = max(i.area for i in self.islands.values())
+            max_room = max(r.target_area for r in self.rooms.values()) if self.rooms else 1
+            scale_limit = min(3.0, max_island / max_room) if max_room > 0 else 3.0
+            scale_factor = min((total_island_area * 0.85) / total_room_area, scale_limit)
+            if scale_factor > 1.0:
+                logger.info(
+                    "Scaling up room areas by %.1f%% (rooms=%.1fm2, islands=%.1fm2)",
+                    (scale_factor - 1) * 100, total_room_area, total_island_area,
+                )
+                for room in self.rooms.values():
+                    room.target_area *= scale_factor
 
-        if total_room_area > total_island_area * self.config.capacity_ratio:
-            raise AssignmentError(
-                f"Insufficient island capacity: rooms need {total_room_area:.1f}m², "
-                f"islands have {total_island_area:.1f}m²"
-            )
-
-        # Step 1: 按优先级排序房间
+        # 按优先级排序
         sorted_rooms = self._sort_rooms()
 
-        # Step 2: 逐个分配房间
-        unassigned_rooms: List[RoomSpec] = []
-
         for room in sorted_rooms:
-            # 2.1 获取候选岛屿
+            # 级别 1: 正常候选
             candidates = self._get_candidate_islands(room)
 
+            # 级别 2: 放宽
             if not candidates:
-                # 放宽约束重试
                 candidates = self._get_candidate_islands_relaxed(room)
 
+            # 级别 3: 强制分配（缩小面积，有下限）
             if not candidates:
-                unassigned_rooms.append(room)
-                logger.warning(f"No valid island for room: {room.room_id}")
+                min_area = room.min_width * room.min_depth
+                largest = max(
+                    self.islands.values(),
+                    key=lambda i: i.remaining_capacity,
+                )
+                if largest.remaining_capacity >= min_area:
+                    room.target_area = largest.remaining_capacity * 0.9
+                    candidates = [largest]
+                    degradation.force_shrunk.append(room.room_id)
+                    logger.warning(
+                        f"Force-shrinking room {room.room_id} to "
+                        f"{room.target_area:.1f}m2 (island {largest.id})"
+                    )
+
+            # 级别 4: 跳过
+            if not candidates:
+                degradation.skipped_rooms.append(room.room_id)
+                logger.warning(f"Skipping room {room.room_id}: no viable island")
                 continue
 
-            # 2.2 评分并选择最佳岛屿
-            best_island = self._select_best_island(room, candidates)
+            best = self._select_best_island(room, candidates)
+            self._assign_room(room, best)
 
-            # 2.3 分配
-            self._assign_room(room, best_island)
-
-        if unassigned_rooms:
-            raise AssignmentError(
-                f"Cannot assign {len(unassigned_rooms)} rooms: "
-                f"{[r.room_id for r in unassigned_rooms]}"
-            )
-
-        # Step 3: 生成结果
-        return self._build_results()
+        return self._build_results(), degradation
 
     def _sort_rooms(self) -> List[RoomSpec]:
         """
@@ -206,11 +215,13 @@ class IslandRoomAssigner:
         return candidates
 
     def _get_candidate_islands_relaxed(self, room: RoomSpec) -> List[Island]:
-        """放宽约束的候选岛屿（仅检查面积）"""
+        """放宽约束的候选岛屿（不检查面积比，只要有剩余空间）"""
         candidates = []
         for island in self.islands.values():
-            if island.remaining_capacity >= room.target_area * 0.7:
+            if island.remaining_capacity > 0:
                 candidates.append(island)
+        # 按剩余容量降序，优先分配到最大的岛屿
+        candidates.sort(key=lambda i: i.remaining_capacity, reverse=True)
         return candidates
 
     def _has_forbidden_neighbor(self, room: RoomSpec, island: Island) -> bool:
@@ -319,18 +330,12 @@ def assign_rooms_to_islands(
     rooms: List[RoomSpec],
     adjacency_graph: Optional[Dict[str, List[str]]] = None,
     config: Optional[AssignerConfig] = None,
-) -> Dict[str, AssignmentResult]:
+) -> Tuple[Dict[str, AssignmentResult], DegradationSummary]:
     """
     便捷函数：房间-岛屿分配
 
-    Args:
-        islands: 岛屿列表
-        rooms: 房间规格列表
-        adjacency_graph: 邻接关系图
-        config: 分配器配置
-
     Returns:
-        {island_id: AssignmentResult}
+        (assignments, degradation_summary)
     """
     if adjacency_graph is None:
         adjacency_graph = {}

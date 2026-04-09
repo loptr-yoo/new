@@ -51,11 +51,17 @@ class CoreTube:
     - 紧凑矩形，包含电梯、楼梯、设备间
     - 占楼层面积 5-10%
     - 位置靠近中心或入口
+    - 自动拆分为 elevator (60-65%) + staircase (35-40%) 两个紧邻子矩形
     """
-    polygon: Polygon
+    polygon: Polygon  # 整体外轮廓（用于拓扑扣除）
     center: Tuple[float, float]
     width: float
     depth: float
+    # 子区域
+    elevator: Optional[Polygon] = None
+    staircase: Optional[Polygon] = None
+    elevator_area: float = 0.0
+    staircase_area: float = 0.0
 
     @classmethod
     def create(
@@ -63,14 +69,33 @@ class CoreTube:
         center: Tuple[float, float],
         width: float,
         depth: float,
+        elevator_ratio: float = 0.62,
     ) -> CoreTube:
-        """创建矩形核心筒"""
+        """创建矩形核心筒，自动拆分 elevator + staircase"""
         cx, cy = center
         polygon = box(
             cx - width / 2, cy - depth / 2,
             cx + width / 2, cy + depth / 2,
         )
-        return cls(polygon=polygon, center=center, width=width, depth=depth)
+
+        # 沿短边方向切一刀
+        if width <= depth:
+            # 短边是 width → 沿 y 方向切
+            split_y = cy - depth / 2 + depth * elevator_ratio
+            elevator = box(cx - width / 2, cy - depth / 2, cx + width / 2, split_y)
+            staircase = box(cx - width / 2, split_y, cx + width / 2, cy + depth / 2)
+        else:
+            # 短边是 depth → 沿 x 方向切
+            split_x = cx - width / 2 + width * elevator_ratio
+            elevator = box(cx - width / 2, cy - depth / 2, split_x, cy + depth / 2)
+            staircase = box(split_x, cy - depth / 2, cx + width / 2, cy + depth / 2)
+
+        return cls(
+            polygon=polygon, center=center, width=width, depth=depth,
+            elevator=elevator, staircase=staircase,
+            elevator_area=float(elevator.area),
+            staircase_area=float(staircase.area),
+        )
 
     @classmethod
     def create_for_floor(
@@ -93,12 +118,35 @@ class CoreTube:
             cy = (y_min + y_max) / 2
         elif position == "entrance":
             cx = (x_min + x_max) / 2
-            cy = y_min + depth / 2 + 3  # 距离入口 3m
+            cy = y_min + depth / 2 + 3
         else:
             cx = (x_min + x_max) / 2
             cy = (y_min + y_max) / 2
 
-        return cls.create((cx, cy), width, depth)
+        core = cls.create((cx, cy), width, depth)
+
+        # 边界安全：确保子区域不超出楼层
+        floor_poly = box(x_min, y_min, x_max, y_max)
+        if core.elevator is not None and not floor_poly.contains(core.elevator):
+            logger.warning("Elevator extends beyond floor boundary, shrinking")
+            clipped = core.elevator.intersection(floor_poly)
+            if not clipped.is_empty and isinstance(clipped, Polygon):
+                core.elevator = clipped
+                core.elevator_area = float(clipped.area)
+            else:
+                core.elevator = None
+                core.elevator_area = 0.0
+        if core.staircase is not None and not floor_poly.contains(core.staircase):
+            logger.warning("Staircase extends beyond floor boundary, shrinking")
+            clipped = core.staircase.intersection(floor_poly)
+            if not clipped.is_empty and isinstance(clipped, Polygon):
+                core.staircase = clipped
+                core.staircase_area = float(clipped.area)
+            else:
+                core.staircase = None
+                core.staircase_area = 0.0
+
+        return core
 
 
 @dataclass
@@ -185,12 +233,16 @@ class RectangularTopologyGenerator:
         self,
         floor_boundary: Polygon,
         corridor_width: float = 2.0,
-        min_island_area: float = 20.0,
+        min_island_area: float = 0.0,  # 0 = auto
         grid_alignment: float = 0.5,
     ):
         self.floor = floor_boundary
         self.corridor_width = corridor_width
-        self.min_island_area = min_island_area
+        # 动态 min_island_area：楼层面积的 2%，下限 4m²
+        if min_island_area <= 0:
+            self.min_island_area = max(4.0, floor_boundary.area * 0.02)
+        else:
+            self.min_island_area = min_island_area
         self.grid_alignment = grid_alignment
 
         self.bounds = floor_boundary.bounds

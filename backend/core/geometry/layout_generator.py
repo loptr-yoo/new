@@ -13,13 +13,12 @@ from __future__ import annotations
 
 import logging
 import time
+from collections import deque
 from dataclasses import dataclass, field
-from typing import Any, List, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 from shapely.geometry import Point, Polygon
-
-from typing import Dict, Optional
 
 from .axis_align import snap_to_grid
 from .constraint_validator import (
@@ -270,8 +269,8 @@ class LayoutGenerator:
     def _compute_aspect_ratio(polygon: Polygon) -> float:
         if polygon.is_empty:
             return float("inf")
-        obb = polygon.minimum_rotated_rectangle
-        coords = list(obb.exterior.coords)
+        mrr = polygon.minimum_rotated_rectangle
+        coords = list(mrr.exterior.coords)  # type: ignore[union-attr]
         e1 = float(np.linalg.norm(np.array(coords[1]) - np.array(coords[0])))
         e2 = float(np.linalg.norm(np.array(coords[2]) - np.array(coords[1])))
         if min(e1, e2) < 1e-6:
@@ -529,6 +528,60 @@ def _check_cross_island_adjacency(
     return warnings
 
 
+def check_connectivity(
+    room_polygons: List[Tuple[str, Polygon]],
+    core_tube_polygon: Optional[Polygon] = None,
+    buffer_tolerance: float = 0.1,
+    min_shared_length: float = 0.5,
+) -> List[str]:
+    """
+    检查每个房间是否通过邻接关系可达核心筒。
+
+    BFS from core_tube，沿 shared-edge 遍历。
+    返回不可达房间的 room_id 列表。
+    """
+    if not room_polygons:
+        return []
+
+    # 构建 ID → polygon 映射
+    all_items: List[Tuple[str, Polygon]] = list(room_polygons)
+    if core_tube_polygon is not None and not core_tube_polygon.is_empty:
+        all_items.append(("_core", core_tube_polygon))
+
+    # 构建邻接图
+    adj: Dict[str, set] = {rid: set() for rid, _ in all_items}
+    for i in range(len(all_items)):
+        for j in range(i + 1, len(all_items)):
+            rid_a, poly_a = all_items[i]
+            rid_b, poly_b = all_items[j]
+            try:
+                shared = poly_a.buffer(buffer_tolerance).intersection(
+                    poly_b.buffer(buffer_tolerance)
+                )
+                if shared.length > min_shared_length:
+                    adj[rid_a].add(rid_b)
+                    adj[rid_b].add(rid_a)
+            except Exception:
+                continue
+
+    # BFS from core (or from first room if no core)
+    start = "_core" if "_core" in adj else (room_polygons[0][0] if room_polygons else None)
+    if start is None:
+        return []
+
+    visited: set = set()
+    queue = deque([start])
+    while queue:
+        node = queue.popleft()
+        if node in visited:
+            continue
+        visited.add(node)
+        queue.extend(adj.get(node, set()) - visited)
+
+    unreachable = [rid for rid, _ in room_polygons if rid not in visited]
+    return unreachable
+
+
 def generate_layout_v2(
     floor_boundary: Polygon,
     room_specs: List[SemanticRoomSpec],
@@ -573,7 +626,7 @@ def generate_layout_v2(
         PartitionError: 岛屿划分失败
     """
     # 延迟导入，避免循环依赖
-    from .island_room_assigner import assign_rooms_to_islands, AssignmentError
+    from .island_room_assigner import assign_rooms_to_islands, DegradationSummary
     from .topology_generator import (
         CoreTube,
         Island,
@@ -620,11 +673,17 @@ def generate_layout_v2(
         )
 
     # ========== Phase 2: 房间-岛屿分配 ==========
-    assignments = assign_rooms_to_islands(
+    assignments, degradation = assign_rooms_to_islands(
         islands=islands,
         rooms=room_specs,
         adjacency_graph=adjacency_graph,
     )
+
+    # 收集降级 warnings
+    if degradation.skipped_rooms:
+        warnings.append(f"Skipped rooms (no island): {degradation.skipped_rooms}")
+    if degradation.force_shrunk:
+        warnings.append(f"Force-shrunk rooms: {degradation.force_shrunk}")
 
     if verbose:
         for island_id, result in assignments.items():
@@ -676,9 +735,26 @@ def generate_layout_v2(
             all_miqp_results.extend(miqp_results)
             all_specs_ordered.extend(assignment.rooms)
         except Exception as e:
-            raise PartitionError(
-                f"Failed to partition island {island_id}: {e}"
-            ) from e
+            # MIQP 失败 → fallback 到基础求解器
+            logger.warning(
+                f"Semantic MIQP failed for {island_id}: {e}, "
+                f"falling back to basic solver"
+            )
+            warnings.append(f"MIQP fallback on {island_id}")
+            try:
+                basic_specs = [
+                    MIQPRoomSpec(
+                        room_id=r.room_id, room_type=r.room_type,
+                        target_area=r.target_area, area_tolerance=0.3,
+                        min_width=r.min_width, min_depth=r.min_depth,
+                    ) for r in assignment.rooms
+                ]
+                miqp_results = partition_island(island.polygon, basic_specs)
+                all_miqp_results.extend(miqp_results)
+                all_specs_ordered.extend(assignment.rooms)
+            except Exception as e2:
+                logger.error(f"Basic solver also failed for {island_id}: {e2}")
+                warnings.append(f"Partition failed completely on {island_id}")
 
     # ========== Phase 5: 网格对齐 + 验证 ==========
     cells = [r.polygon for r in all_miqp_results]
@@ -747,6 +823,13 @@ def generate_layout_v2(
             facade_length=facade,
             aspect_ratio=aspect,
         ))
+
+    # ========== Phase 6: 连通性检查 ==========
+    core_poly = core_tube.polygon if core_tube is not None else None
+    room_polys = [(r.id, r.polygon) for r in rooms if not r.polygon.is_empty]
+    unreachable = check_connectivity(room_polys, core_poly)
+    if unreachable:
+        warnings.append(f"Unreachable rooms: {unreachable}")
 
     return LayoutResultV2(
         core_tube=core_tube,

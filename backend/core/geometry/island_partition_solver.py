@@ -287,7 +287,7 @@ class IslandPartitionSolver:
         bbox = shapely_box(self.x_min, self.y_min, self.x_max, self.y_max)
         forbidden = bbox.difference(self.island)
         if not forbidden.is_empty:
-            parts = list(forbidden.geoms) if hasattr(forbidden, 'geoms') else [forbidden]
+            parts = list(getattr(forbidden, 'geoms', [forbidden]))
             for fi, part in enumerate(parts):
                 if not isinstance(part, Polygon) or part.is_empty or part.area < 0.01:
                     continue
@@ -621,7 +621,7 @@ class SemanticIslandPartitionSolver:
 
         parts = []
         if hasattr(forbidden, 'geoms'):
-            for g in forbidden.geoms:
+            for g in getattr(forbidden, 'geoms', []):
                 if isinstance(g, Polygon) and not g.is_empty and g.area > 0.01:
                     parts.append(g)
         elif isinstance(forbidden, Polygon) and forbidden.area > 0.01:

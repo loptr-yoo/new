@@ -75,6 +75,7 @@ export interface LayoutElement {
   label?: string;
   subType?: string; // For things like 'lane_line' direction
   forward?: [number, number, number]; // 车位指向行车道的方向向量，右/下/上/左为主轴
+  polygon?: [number, number][]; // 精确多边形轮廓（优先于矩形渲染）
 }
 
 export interface ParkingLayout {
@@ -143,4 +144,46 @@ export interface BuildingFloor {
 export interface BuildingData {
   blueprint: LayoutElement[];
   floors: Record<string, ParkingLayout>;
+}
+
+// ============================================================
+// V2 新管线类型（/api/building/generate）
+// ============================================================
+
+export interface RoomResultV2 {
+  room_id: string;
+  room_type: string;
+  floor_id: string;
+  polygon: [number, number][];
+  center: [number, number];
+  area: number;
+  width: number;
+  depth: number;
+  target_area: number;
+  has_window: boolean;
+}
+
+export interface CoreTubeV2 {
+  boundary: [number, number][];
+  center: [number, number];
+  area: number;
+  elevator?: { polygon: [number, number][]; area: number };
+  staircase?: { polygon: [number, number][]; area: number };
+}
+
+export interface BuildingFloorV2 {
+  floor_name: string;
+  rooms: RoomResultV2[];
+  generation_time_ms: number;
+  warnings: string[];
+}
+
+export interface BuildingDataV2 {
+  building: {
+    width: number;
+    depth: number;
+    floors: Record<string, BuildingFloorV2>;
+  };
+  core_tube: CoreTubeV2 | null;
+  warnings: string[];
 }

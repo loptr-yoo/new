@@ -6,13 +6,13 @@ import { DEFAULT_SCENE_ID, SCENE_REGISTRY } from '../utils/sceneRegistry';
 import { FALLBACK_COLOR } from '../theme/buildingColorScheme';
 
 const ELEMENT_STYLES: Record<string, { fill: string; opacity: number; stroke?: string; strokeWidth?: number }> = {
-  [ElementType.GROUND]: { fill: '#334155', opacity: 1 }, 
-  [ElementType.ROAD]: { fill: '#1e293b', opacity: 1 },   
+  [ElementType.GROUND]: { fill: '#1e293b', opacity: 1 },   // 统一为 floor_slab 色
+  [ElementType.ROAD]: { fill: '#1e293b', opacity: 1 },
   [ElementType.PARKING_SPACE]: { fill: '#3b82f6', opacity: 1 },
-  [ElementType.SIDEWALK]: { fill: '#1e293b', opacity: 1 }, 
+  [ElementType.SIDEWALK]: { fill: '#1e293b', opacity: 1 },
   [ElementType.RAMP]: { fill: '#c026d3', opacity: 1 },
   [ElementType.PILLAR]: { fill: '#94a3b8', opacity: 1 },
-  [ElementType.WALL]: { fill: '#f1f5f9', opacity: 1 },
+  [ElementType.WALL]: { fill: '#475569', opacity: 1 },   // 统一为 exterior_wall 色
   [ElementType.ENTRANCE]: { fill: '#15803d', opacity: 1 },
   [ElementType.EXIT]: { fill: '#b91c1c', opacity: 1 },
   [ElementType.STAIRCASE]: { fill: '#b45309', opacity: 1 },
@@ -231,6 +231,14 @@ const MapRenderer = forwardRef<MapRendererHandle>((props, ref) => {
              .attr("transform", `rotate(${rot}, ${cx}, ${cy})`)
              .style("shape-rendering", "geometricPrecision");
         } 
+        else if (d.polygon && d.polygon.length >= 3) {
+            // 精确多边形渲染（V2 新管线）
+            const points = d.polygon.map(([px, py]: [number, number]) => `${px - d.x},${py - d.y}`).join(' ');
+            g.append("polygon")
+              .attr("points", points)
+              .attr("fill", style.fill)
+              .attr("opacity", style.opacity ?? 1);
+        }
         else {
             const rect = g.append("rect")
               .attr("width", w).attr("height", h)

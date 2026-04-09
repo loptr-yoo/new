@@ -126,6 +126,9 @@ class RoomAllocation(BaseModel):
     adjacency_preferred: List[str] = Field(default_factory=list, description="偏好相邻的房间ID列表")
     adjacency_forbidden: List[str] = Field(default_factory=list, description="禁止相邻的房间ID列表")
 
+    # size_hint（两步 LLM 模式：Step 2 输出，后端转为 target_area）
+    size_hint: Optional[str] = Field(default=None, description="面积提示: large/medium/small（有值时覆盖 target_area）")
+
     # 优先级
     weight: int = Field(default=5, ge=1, le=10, description="优先级/权重（1-10）")
 

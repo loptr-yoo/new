@@ -36,16 +36,17 @@
 </head>
 <body>
 <div class="container">
-    <h1>Color System v2 — Per-Element</h1>
+    <h1>Color System v2.1 — Unified Semantic Colors</h1>
     <p class="subtitle">
-        Each element has its own color. Shared elements across scenes are guaranteed identical.
-        Source: <code>buildingColorScheme.json v2.0.0</code> |
-        Fingerprint: <code>ff7c42dd...20b</code> |
+        Same semantic element = same color across Parking / Floor Plan / Building scenes.
+        Generic Scene has independent colors.
+        Source: <code>buildingColorScheme.json v2.1.0</code> |
         Fallback: <code style="color:#FF00FF">#FF00FF</code>
     </p>
     <nav class="toc"><ul>
         <li><a href="#parking">Parking Scene (19)</a></li>
         <li><a href="#floor">Floor Plan Scene (44)</a></li>
+        <li><a href="#building">Building Scene (= Floor Plan)</a></li>
         <li><a href="#generic">Generic Scene (9)</a></li>
         <li><a href="#fallback">MapRenderer Fallback (18)</a></li>
     </ul></nav>
@@ -66,6 +67,12 @@
         <div class="grid" id="floor-grid"></div>
     </div>
 
+    <!-- Building -->
+    <div class="section" id="building">
+        <h2>Building Scene <span class="badge">= Floor Plan styles</span></h2>
+        <p style="color:var(--muted);font-size:12px;margin-bottom:12px">Building 场景复用楼层平面的全部颜色。每层楼的 sceneId 设为 building_floor_plan。</p>
+    </div>
+
     <!-- Generic -->
     <div class="section" id="generic">
         <h2>Generic Scene <span class="badge">hardcoded in sceneRegistry.ts</span></h2>
@@ -82,26 +89,25 @@
 
 <script>
 // ====== Data from buildingColorScheme.json v2.0.0 ======
-const shared = new Set(['pillar','staircase','elevator','elevator_shaft']);
+const shared = new Set(['pillar','staircase','elevator','wall','ground']);
 
 const parkingColors = {
-    ground:'#334155', wall:'#f1f5f9', pillar:'#94a3b8',
+    ground:'#1e293b', wall:'#475569', pillar:'#94a3b8',
     driving_lane:'#1e293b', pedestrian_path:'#475569', slope:'#c026d3',
     entrance:'#15803d', exit:'#b91c1c', parking_space:'#3b82f6',
     ground_line:'#facc15', deceleration_zone:'#eab308',
-    staircase:'#b45309', elevator:'#06b6d4', elevator_shaft:'#991b1b',
+    staircase:'#b45309', elevator:'#06b6d4',
     charging_station:'#22c55e', guidance_sign:'#f59e0b',
     safe_exit:'#10b981', fire_extinguisher:'#ef4444', convex_mirror:'#38bdf8'
 };
 
 const floorColors = {
     // Structure
-    floor_slab:'#1e293b', exterior_wall:'#475569', partition_wall:'#64748b',
-    shear_wall:'#475569', parapet:'#78716c', pillar:'#94a3b8',
+    floor_slab:'#1e293b', wall:'#475569', pillar:'#94a3b8',
     window:'#a5b4fc', door:'#e2e8f0', fire_door:'#dc2626',
     // Circulation
-    corridor:'#cbd5e1', lobby:'#9ca3af', aisle:'#a1a1aa', elevator_lobby:'#7dd3fc',
-    elevator_shaft:'#991b1b', staircase:'#b45309', elevator:'#06b6d4',
+    corridor:'#cbd5e1', lobby:'#9ca3af', aisle:'#a1a1aa',
+    staircase:'#b45309', elevator:'#06b6d4',
     pipe_shaft:'#064e3b',
     // Residential zones
     kitchen:'#fb923c', bathroom:'#2dd4bf',
@@ -137,13 +143,13 @@ const genericColors = [
 
 // From MapRenderer.tsx ELEMENT_STYLES (fallback)
 const fallbackColors = [
-    { name:'GROUND (ground)',              fill:'#334155' },
+    { name:'GROUND (ground)',              fill:'#1e293b' },
     { name:'ROAD (driving_lane)',          fill:'#1e293b' },
     { name:'PARKING_SPACE',                fill:'#3b82f6' },
     { name:'SIDEWALK (pedestrian_path)',   fill:'#1e293b' },
     { name:'RAMP (slope)',                 fill:'#c026d3' },
     { name:'PILLAR',                       fill:'#94a3b8' },
-    { name:'WALL',                         fill:'#f1f5f9' },
+    { name:'WALL',                         fill:'#475569' },
     { name:'ENTRANCE',                     fill:'#15803d' },
     { name:'EXIT',                         fill:'#b91c1c' },
     { name:'STAIRCASE',                    fill:'#b45309' },

@@ -67,7 +67,8 @@ def _pick_provider_model_and_key(
 @router.post("/v1/generate/semantics", response_model=Union[BuildingAllocation, BuildingData])
 async def generate_semantics_endpoint(request: GenerateSemanticsRequest):
     if request.scene_type == SceneType.BUILDING:
-        return await generate_building_semantics(request)
+        allocation, _warnings = await generate_building_semantics(request)
+        return allocation
 
     if request.scene_type in (SceneType.FLOOR, SceneType.PARKING):
         scene_id_map = {
@@ -163,3 +164,101 @@ async def generate_stream(req: GenerateRequest, request: Request):
             return
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
+# ============================================================
+# 新管线：Building 端到端（语义 → 几何 → 序列化）
+# ============================================================
+
+from pydantic import BaseModel as _BaseModel
+
+
+class BuildingGenerateRequest(_BaseModel):
+    """新管线请求体"""
+    prompt: str
+    total_area: Optional[float] = None
+    total_floors: Optional[int] = None
+    floor_width: Optional[float] = None
+    floor_depth: Optional[float] = None
+    provider: Optional[str] = None
+    model: Optional[str] = None
+
+
+@router.post("/building/generate")
+async def generate_building_layout(req: BuildingGenerateRequest):
+    """
+    端到端 Building 生成 API（同步返回）
+
+    管线：LLM → BuildingAllocation → BuildingOrchestrator → 序列化 JSON
+    """
+    try:
+        result = await asyncio.wait_for(
+            _generate_building_pipeline(req),
+            timeout=120.0,
+        )
+        return result
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="Generation timed out (120s)")
+    except Exception as e:
+        logger.exception("Building generation failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+async def _generate_building_pipeline(req: BuildingGenerateRequest) -> dict:
+    """完整管线：LLM → 解析 → 几何 → 序列化"""
+    import math
+    from shapely.geometry import box
+
+    from ...core.geometry.building_orchestrator import BuildingOrchestrator
+    from ...core.geometry.serializers import building_result_to_dict
+    from ...core.geometry.room_spec import SolverConfig
+
+    # 1. LLM → BuildingAllocation + parse warnings
+    allocation, parse_warnings = await generate_building_semantics(
+        GenerateSemanticsRequest(
+            scene_type=SceneType.BUILDING,
+            user_prompt=req.prompt,
+            total_area=req.total_area,
+            total_floors=req.total_floors,
+            provider=req.provider,
+            model=req.model,
+        )
+    )
+
+    # 2. 构建楼层边界
+    if req.floor_width and req.floor_depth:
+        floor_boundary = box(0, 0, req.floor_width, req.floor_depth)
+    else:
+        floor_area = allocation.floors[0].floor_total_area
+        w = math.sqrt(floor_area * 3 / 2)
+        d = floor_area / w
+        floor_boundary = box(0, 0, w, d)
+
+    # 3. 根据楼层面积动态调整参数（小楼层缩减走廊和核心筒）
+    floor_area = floor_boundary.area
+    if floor_area < 200:
+        corridor_width = 1.2
+        core_area_ratio = 0.05
+    elif floor_area < 500:
+        corridor_width = 1.5
+        core_area_ratio = 0.06
+    else:
+        corridor_width = 2.0
+        core_area_ratio = 0.08
+
+    # 4. BuildingOrchestrator → BuildingResult（CPU 密集，在线程池中运行）
+    orchestrator = BuildingOrchestrator(
+        floor_boundary=floor_boundary,
+        corridor_width=corridor_width,
+        core_area_ratio=core_area_ratio,
+    )
+    building_result = await asyncio.to_thread(orchestrator.generate, allocation)
+
+    # 5. 序列化 + 合并 parse_warnings
+    result = building_result_to_dict(building_result, floor_boundary)
+    # 合并解析阶段的 warnings
+    if parse_warnings:
+        if "warnings" not in result:
+            result["warnings"] = []
+        result["warnings"].extend(parse_warnings)
+    return result

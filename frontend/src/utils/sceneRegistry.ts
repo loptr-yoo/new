@@ -224,6 +224,16 @@ export const FloorPlanScene: SceneDefinition = {
       hall: 'corridor',
       // 商业变体
       store_front: 'retail',
+      // 墙体统一 → wall
+      exterior_wall: 'wall',
+      partition_wall: 'wall',
+      shear_wall: 'wall',
+      parapet: 'wall',
+      interior_wall: 'wall',
+      // 电梯统一 → elevator
+      elevator_shaft: 'elevator',
+      elevator_lobby: 'elevator',
+      elevator_hall: 'elevator',
   },
   zOrder: [
       ElementType.SLAB,
@@ -233,8 +243,8 @@ export const FloorPlanScene: SceneDefinition = {
       'retail', 'shop', 'food_court', 'kiosk',
       ElementType.CORRIDOR,
       'cabinet', 'wardrobe', 'desk', 'dining_table', 'sofa', 'bed', 'toilet', 'sink',
-      ElementType.SERVICE_SHAFT, ElementType.STAIRCASE, ElementType.ELEVATOR_SHAFT,
-      ElementType.WALL_INTERNAL, ElementType.WALL_EXTERNAL, ElementType.SHEAR_WALL, ElementType.PILLAR,
+      ElementType.SERVICE_SHAFT, ElementType.STAIRCASE, 'elevator',
+      'wall', ElementType.PILLAR,
       ElementType.WINDOW, ElementType.DOOR
   ]
 };
@@ -249,7 +259,7 @@ export const BuildingScene: SceneDefinition = {
     requiredElements: [],
     exampleJSON: `{"floors":[{"id":"B1","sceneId":"parking_underground"},{"id":"1F","sceneId":"building_floor_plan"}]}`
   },
-  styles: {},
+  styles: createFloorPlanSceneStyles(),  // 复用楼层平面样式
   zOrder: []
 };
 

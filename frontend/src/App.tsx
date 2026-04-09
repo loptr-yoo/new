@@ -2,7 +2,7 @@
 import React, { useRef, useEffect, useState } from 'react';
 import MapRenderer, { MapRendererHandle } from './components/MapRenderer';
 import LayoutControl from './components/LayoutControl';
-import { generateBuilding, augmentLayout, getApiKeyFromEnv } from './services/aiService';
+import { generateBuilding, generateBuildingV2, convertV2ToBuildingData, augmentLayout, getApiKeyFromEnv } from './services/aiService';
 import { useStore } from './store';
 import { useLLMStream } from './hooks/useLLMStream';
 
@@ -61,14 +61,30 @@ const App: React.FC = () => {
       setBuildingData(null);
       setActiveFloor('');
 
-      const newBuilding = await wrapStreamCall((signal) => 
-        generateBuilding(prompt, {
-          provider: selectedProvider,
-          model: selectedModel,
-          apiKey,
-        }, addLog, sceneId, signal)
-      );
-      
+      let newBuilding: import('./types').BuildingData;
+
+      if (sceneId === 'building') {
+        // Building 模式：走新管线（非流式）
+        addLog('正在调用 AI 语义规划 + 几何求解...');
+        const v2Result = await wrapStreamCall((signal) =>
+          generateBuildingV2(prompt, {
+            provider: selectedProvider,
+            model: selectedModel,
+            apiKey,
+          }, signal)
+        );
+        newBuilding = convertV2ToBuildingData(v2Result);
+      } else {
+        // 其他场景：走旧管线（SSE 流式）
+        newBuilding = await wrapStreamCall((signal) =>
+          generateBuilding(prompt, {
+            provider: selectedProvider,
+            model: selectedModel,
+            apiKey,
+          }, addLog, sceneId, signal)
+        );
+      }
+
       setBuildingData(newBuilding);
       const floorIds = Object.keys(newBuilding.floors);
       if (floorIds.length > 0) {
@@ -76,8 +92,8 @@ const App: React.FC = () => {
         setActiveFloor(firstFloor);
         setLayout(newBuilding.floors[firstFloor]);
       }
-      
-      setViolations([]); 
+
+      setViolations([]);
       addLog("Generation complete.");
     } catch (e: any) {
       if (e.isUserCanceled) {
@@ -184,7 +200,11 @@ const App: React.FC = () => {
             {buildingData && Object.keys(buildingData.floors).length > 1 && (
                 <div className="absolute top-4 left-4 z-10 flex flex-wrap gap-2 bg-slate-900/80 p-2 rounded-lg border border-slate-700 backdrop-blur max-w-[80%]">
                     <span className="text-slate-400 text-xs flex items-center mr-2">楼层:</span>
-                    {Object.keys(buildingData.floors).map(floorId => {
+                    {[...Object.keys(buildingData.floors)].sort((a, b) => {
+                        const numA = parseInt(a.replace(/\D/g, ''), 10) || 0;
+                        const numB = parseInt(b.replace(/\D/g, ''), 10) || 0;
+                        return numA - numB;
+                    }).map(floorId => {
                         const floorName = floorId.startsWith('floor_')
                           ? `${floorId.replace('floor_', '')}F`
                           : floorId;

@@ -147,10 +147,8 @@ class BuildingOrchestrator:
             except ValueError:
                 zone = ZoneType.PUBLIC
 
-            # needs_window: 新字段优先，旧字段兼容
+            # needs_window: 已在 _normalize_allocation 中推导完成
             needs_window = room.needs_window
-            if room.requires_window is not None:
-                needs_window = room.requires_window
 
             # aspect_ratio_range
             ar = room.aspect_ratio_range
