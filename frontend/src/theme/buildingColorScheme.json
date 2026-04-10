@@ -1,12 +1,12 @@
 {
   "version": "2.1.0",
-  "fingerprint": "unified-semantic-colors-2026-04-09",
+  "fingerprint": "9161e59c69caf35df40335d4c9179636f8b06bf70f0c7fbb45051238aa421ae9",
   "semanticColors": {
     "fallback": "#FF00FF"
   },
   "parkingElementColors": {
     "ground": "#1e293b",
-    "wall": "#475569",
+    "wall": "#334155",
     "pillar": "#94a3b8",
     "driving_lane": "#1e293b",
     "pedestrian_path": "#475569",
@@ -26,7 +26,7 @@
   },
   "floorplanElementColors": {
     "floor_slab": "#1e293b",
-    "wall": "#475569",
+    "wall": "#334155",
     "pillar": "#94a3b8",
     "window": "#a5b4fc",
     "door": "#e2e8f0",
@@ -41,6 +41,10 @@
     "bathroom": "#2dd4bf",
     "living_room": "#a78bfa",
     "bedroom": "#818cf8",
+    "master_bedroom": "#6366f1",
+    "dining_room": "#f97316",
+    "dining": "#f97316",
+    "study": "#8b5cf6",
     "storage": "#a8a29e",
     "office": "#60a5fa",
     "open_office": "#93c5fd",

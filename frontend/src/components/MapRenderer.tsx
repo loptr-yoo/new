@@ -23,11 +23,41 @@ const ELEMENT_STYLES: Record<string, { fill: string; opacity: number; stroke?: s
   [ElementType.SPEED_BUMP]: { fill: '#eab308', opacity: 1 },
   [ElementType.FIRE_EXTINGUISHER]: { fill: '#ef4444', opacity: 1 },
   [ElementType.LANE_LINE]: { fill: 'none', opacity: 1, stroke: '#facc15', strokeWidth: 1.5 },
-  [ElementType.CONVEX_MIRROR]: { fill: '#38bdf8', opacity: 1 }
+  [ElementType.CONVEX_MIRROR]: { fill: '#38bdf8', opacity: 1 },
+  // V2 Building 元素
+  'floor_slab': { fill: '#1e293b', opacity: 1 },
+  'corridor': { fill: '#cbd5e1', opacity: 0.7 },
+  'exterior_wall': { fill: '#475569', opacity: 1 },
+  'partition_wall': { fill: '#64748b', opacity: 1 },
+  'door': { fill: '#e2e8f0', opacity: 1 },
+  'window': { fill: '#7dd3fc', opacity: 0.8 },
 };
 
 const BACKGROUND_COLOR = '#020617';
 const warnedMissingStyleTypes = new Set<string>();
+
+function resolveBackgroundColor(scene: any, styles: any): string {
+  const cfg = scene?.background;
+  if (!cfg) return BACKGROUND_COLOR;
+  if (cfg.mode === 'fixed') return cfg.color || BACKGROUND_COLOR;
+  if (cfg.mode === 'styleKey') {
+    const key = cfg.styleKey;
+    return (key && styles?.[key]?.fill) || cfg.fallbackColor || BACKGROUND_COLOR;
+  }
+  return BACKGROUND_COLOR;
+}
+
+function isOrthogonalPolygon(polygon: [number, number][]): boolean {
+  const eps = 1e-6;
+  for (let i = 0; i < polygon.length - 1; i++) {
+    const [x1, y1] = polygon[i];
+    const [x2, y2] = polygon[i + 1];
+    const dx = Math.abs(x2 - x1);
+    const dy = Math.abs(y2 - y1);
+    if (dx > eps && dy > eps) return false;
+  }
+  return true;
+}
 
 export interface MapRendererHandle {
   downloadJpg: () => void;
@@ -65,7 +95,10 @@ const MapRenderer = forwardRef<MapRendererHandle>((props, ref) => {
         const ctx = canvas.getContext("2d");
         if (ctx) {
           ctx.imageSmoothingEnabled = false; 
-          ctx.fillStyle = BACKGROUND_COLOR; 
+          const exportSceneKey = layout.sceneId || activeSceneId;
+          const exportScene = SCENE_REGISTRY[exportSceneKey] || SCENE_REGISTRY[DEFAULT_SCENE_ID];
+          const exportStyles = (exportScene?.styles && Object.keys(exportScene.styles).length > 0) ? exportScene.styles : ELEMENT_STYLES;
+          ctx.fillStyle = resolveBackgroundColor(exportScene as any, exportStyles as any);
           ctx.fillRect(0, 0, canvas.width, canvas.height);
           ctx.drawImage(img, 0, 0);
           const jpgUrl = canvas.toDataURL("image/jpeg", 0.98);
@@ -113,33 +146,47 @@ const MapRenderer = forwardRef<MapRendererHandle>((props, ref) => {
     const sceneStyles = baseStyles as any;
     
     const defaultZOrder = [
-        ElementType.WALL, 
-        ElementType.GROUND, 
-        ElementType.ROAD, 
+        'floor_slab',
+        ElementType.GROUND,
+        'corridor',
+        ElementType.ROAD,
+        ElementType.SIDEWALK,
         ElementType.RAMP,
-        ElementType.SIDEWALK, 
-        ElementType.PARKING_SPACE, 
-        ElementType.LANE_LINE, 
-        ElementType.SPEED_BUMP, 
-        ElementType.PILLAR, 
+        ElementType.PARKING_SPACE,
+        'exterior_wall',
+        'partition_wall',
+        ElementType.WALL,
+        ElementType.PILLAR,
         ElementType.STAIRCASE,
         ElementType.ELEVATOR,
+        'door',
+        'window',
+        ElementType.LANE_LINE,
+        ElementType.SPEED_BUMP,
         ElementType.SAFE_EXIT,
         ElementType.FIRE_EXTINGUISHER,
-        ElementType.GUIDANCE_SIGN
+        ElementType.GUIDANCE_SIGN,
+        ElementType.ENTRANCE,
+        ElementType.EXIT,
+        ElementType.CHARGING_STATION,
+        ElementType.CONVEX_MIRROR,
     ];
     const zOrder = (activeScene?.zOrder && activeScene.zOrder.length > 0) ? activeScene.zOrder : defaultZOrder;
     
     const sortedElements = [...elements].sort((a, b) => {
       const idxA = zOrder.indexOf(a.type as ElementType);
       const idxB = zOrder.indexOf(b.type as ElementType);
-      return (idxA === -1 ? 999 : idxA) - (idxB === -1 ? 999 : idxB);
+      // 未知类型（如 living_room, bedroom）放在 corridor 和 wall 之间
+      const defaultIdx = zOrder.indexOf('exterior_wall') - 0.5;
+      return (idxA === -1 ? defaultIdx : idxA) - (idxB === -1 ? defaultIdx : idxB);
     });
+
+    const bgColor = resolveBackgroundColor(activeScene as any, sceneStyles);
 
     mainGroup.append("rect")
       .attr("x", 0).attr("y", 0)
       .attr("width", width).attr("height", height)
-      .attr("fill", BACKGROUND_COLOR)
+      .attr("fill", bgColor)
       .attr("opacity", 1);
 
     mainGroup.selectAll("g.element")
@@ -232,12 +279,51 @@ const MapRenderer = forwardRef<MapRendererHandle>((props, ref) => {
              .style("shape-rendering", "geometricPrecision");
         } 
         else if (d.polygon && d.polygon.length >= 3) {
-            // 精确多边形渲染（V2 新管线）
+            const structuralTypes = new Set<string>([
+              'floor_slab',
+              'corridor',
+              'wall',
+              'exterior_wall',
+              'partition_wall',
+              'door',
+              'window',
+              ElementType.PILLAR,
+              ElementType.ELEVATOR,
+              ElementType.STAIRCASE,
+              ElementType.WALL,
+            ]);
+            const isStructural =
+              structuralTypes.has(normalizedType) ||
+              structuralTypes.has(rawType) ||
+              rawType === 'exterior_wall' ||
+              rawType === 'partition_wall';
+            const isWall =
+              rawType === 'exterior_wall' ||
+              rawType === 'partition_wall' ||
+              normalizedType === 'wall' ||
+              normalizedType === ElementType.WALL;
+
             const points = d.polygon.map(([px, py]: [number, number]) => `${px - d.x},${py - d.y}`).join(' ');
-            g.append("polygon")
+            const poly = g.append("polygon")
               .attr("points", points)
               .attr("fill", style.fill)
               .attr("opacity", style.opacity ?? 1);
+
+            if (!isStructural) {
+              poly
+                .attr("stroke", "#334155")
+                .attr("stroke-width", 0.2)
+                .attr("stroke-opacity", 0.35);
+            } else {
+              poly.attr("stroke", "none");
+            }
+
+            const orthogonal = isOrthogonalPolygon(d.polygon);
+            poly.style("shape-rendering", orthogonal ? "crispEdges" : "geometricPrecision");
+
+            if (isWall) {
+              poly.attr("fill", "#334155").attr("opacity", 1).style("shape-rendering", "crispEdges");
+            }
         }
         else {
             const rect = g.append("rect")

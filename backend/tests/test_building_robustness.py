@@ -565,6 +565,67 @@ class TestWallDoorWindowGeneration:
             assert "position" in d
             assert "room_id" in d
 
+    def test_extract_linestrings_splits_filters_and_supports_linearring(self):
+        from shapely.geometry import LineString, Polygon
+        from backend.core.geometry.postprocessor import _extract_linestrings
+
+        line = LineString([(0, 0), (1, 0), (1, 1)])
+        segments = _extract_linestrings(line)
+        assert len(segments) == 2
+        assert all(len(list(s.coords)) == 2 for s in segments)
+
+        with_tiny = LineString([(0, 0), (0.01, 0), (1, 0)])
+        segments2 = _extract_linestrings(with_tiny)
+        assert len(segments2) == 1
+        assert segments2[0].length > 0.05
+
+        ring = Polygon([(0, 0), (2, 0), (2, 1), (0, 1)]).exterior
+        segments3 = _extract_linestrings(ring)
+        assert len(segments3) == 4
+        assert all(len(list(s.coords)) == 2 for s in segments3)
+
+    def test_dedup_walls_ignores_room_ids_for_same_segment(self):
+        from shapely.geometry import LineString
+        from backend.core.geometry.postprocessor import WallSegment, _dedup_walls
+
+        w1 = WallSegment(
+            type="exterior_wall",
+            geometry=LineString([(0, 0), (1, 0)]),
+            thickness=0.24,
+            room_ids=["r1"],
+        )
+        w2 = WallSegment(
+            type="exterior_wall",
+            geometry=LineString([(0, 0), (1, 0)]),
+            thickness=0.24,
+            room_ids=["r2"],
+        )
+        w3 = WallSegment(
+            type="partition_wall",
+            geometry=LineString([(0, 0), (1, 0)]),
+            thickness=0.12,
+            room_ids=["r1", "r2"],
+        )
+
+        deduped = _dedup_walls([w1, w2, w3])
+        assert len(deduped) == 2
+
+    def test_corridors_do_not_overlap_core_after_cut(self):
+        from shapely.geometry import box
+        from backend.core.geometry.topology_generator import CoreTube, generate_rectangular_topology
+
+        boundary = box(0, 0, 20, 15)
+        core = CoreTube.create(center=(10, 7.5), width=3.0, depth=3.0)
+        core2, corridors, _islands = generate_rectangular_topology(
+            floor_boundary=boundary,
+            corridor_width=2.0,
+            corridor_layout="cross",
+            core_tube_override=core,
+        )
+
+        for c in corridors:
+            assert c.polygon.intersection(core2.polygon).area < 1e-6
+
 
 # ============================================================
 # Phase 5: 降级摘要
@@ -706,10 +767,11 @@ class TestCombinedFailures:
 class TestSerializerIntegration:
 
     def test_building_result_to_dict_has_walls(self):
-        """building_result_to_dict 输出包含 walls/doors/windows"""
-        from shapely.geometry import box
+        """building_result_to_dict 输出包含 walls/doors/windows/corridors/floor_slab"""
+        from shapely.geometry import box, LineString
         from backend.core.geometry.layout_generator import RoomResult, LayoutResultV2
         from backend.core.geometry.building_orchestrator import BuildingResult
+        from backend.core.geometry.topology_generator import Corridor
         from backend.core.geometry.serializers import building_result_to_dict
 
         rooms = [
@@ -729,9 +791,18 @@ class TestSerializerIntegration:
             ),
         ]
 
+        corridors = [
+            Corridor(
+                id="corridor_h",
+                centerline=LineString([(0, 2.5), (12, 2.5)]),
+                width=2.0,
+                orientation="horizontal",
+            ),
+        ]
+
         layout = LayoutResultV2(
             core_tube=None,
-            corridors=[],
+            corridors=corridors,
             islands=[],
             assignments={},
             room_layouts=rooms,
@@ -752,9 +823,14 @@ class TestSerializerIntegration:
         assert "walls" in f1
         assert "doors" in f1
         assert "windows" in f1
+        assert "corridors" in f1
+        assert "floor_slab" in f1
         assert isinstance(f1["walls"], list)
-        assert isinstance(f1["doors"], list)
-        assert isinstance(f1["windows"], list)
+        assert isinstance(f1["corridors"], list)
+        assert len(f1["corridors"]) == 1
+        assert f1["corridors"][0]["type"] == "corridor"
+        assert f1["floor_slab"]["type"] == "floor_slab"
+        assert f1["floor_slab"]["width"] == 12.0
 
     def test_degradation_summary_in_response(self):
         """API 响应包含 degradation_summary"""

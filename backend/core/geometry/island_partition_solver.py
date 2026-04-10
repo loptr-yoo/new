@@ -224,6 +224,116 @@ class IslandPartitionSolver:
         return _squarify_impl(sizes, x, y, w, h)
 
     # ----------------------------------------------------------
+    # 拓扑冻结：Treemap → 正交位置关系 → 线性约束
+    # ----------------------------------------------------------
+
+    def _freeze_topology_from_treemap(
+        self, warm_starts: List[RoomResult],
+    ) -> List[Tuple[str, str, str]]:
+        """从 Treemap Guillotine Cut 结果提取正交相对位置关系。
+
+        Treemap 的 Guillotine Cut 保证 abs(dx) > abs(dy) 方向判断安全。
+        返回 [(room_a_id, room_b_id, relation), ...] 其中 relation ∈ {left, right, below, above}
+        """
+        relations: List[Tuple[str, str, str]] = []
+        for i, a in enumerate(warm_starts):
+            for j, b in enumerate(warm_starts):
+                if i >= j:
+                    continue
+                a_cx = a.x + a.width / 2
+                a_cy = a.y + a.depth / 2
+                b_cx = b.x + b.width / 2
+                b_cy = b.y + b.depth / 2
+                dx = b_cx - a_cx
+                dy = b_cy - a_cy
+
+                if abs(dx) > abs(dy):
+                    relations.append((a.room_id, b.room_id, "left" if dx > 0 else "right"))
+                else:
+                    relations.append((a.room_id, b.room_id, "below" if dy > 0 else "above"))
+        return relations
+
+    def _add_frozen_topology_constraints(
+        self, model, x, y, w, d, relations, SCALE: int,
+    ):
+        """将拓扑关系冻结为线性约束，消除 Big-M 二元变量 → MIQP 退化为 LP"""
+        for room_a_id, room_b_id, rel in relations:
+            ai = self.room_index.get(room_a_id)
+            bi = self.room_index.get(room_b_id)
+            if ai is None or bi is None:
+                continue
+            if rel == "left":
+                model.Add(x[ai] + w[ai] <= x[bi])
+            elif rel == "right":
+                model.Add(x[bi] + w[bi] <= x[ai])
+            elif rel == "below":
+                model.Add(y[ai] + d[ai] <= y[bi])
+            elif rel == "above":
+                model.Add(y[bi] + d[bi] <= y[ai])
+
+    # ----------------------------------------------------------
+    # 走廊挂载约束 + INFEASIBLE 防护
+    # ----------------------------------------------------------
+
+    def _add_corridor_attachment_constraints(
+        self, model, x, y, w, d, corridor_edges: List[str], SCALE: int,
+    ):
+        """强制需要走廊入口的房间贴边，含 INFEASIBLE 防护。
+
+        corridor_edges: 岛屿接触走廊的方向列表 ['south', 'north', 'west', 'east']
+        """
+        if not corridor_edges:
+            return
+
+        island_bounds = self.island.bounds  # (minx, miny, maxx, maxy)
+
+        # 选择主走廊边（取最长的走廊接触边）
+        edge_lengths: Dict[str, float] = {}
+        if "south" in corridor_edges:
+            edge_lengths["south"] = island_bounds[2] - island_bounds[0]
+        if "north" in corridor_edges:
+            edge_lengths["north"] = island_bounds[2] - island_bounds[0]
+        if "west" in corridor_edges:
+            edge_lengths["west"] = island_bounds[3] - island_bounds[1]
+        if "east" in corridor_edges:
+            edge_lengths["east"] = island_bounds[3] - island_bounds[1]
+
+        if not edge_lengths:
+            return
+
+        primary_edge = max(edge_lengths, key=lambda k: edge_lengths[k])
+        edge_length = edge_lengths[primary_edge]
+
+        # 收集需要贴边的房间，按面积降序（大房间保留走廊路权）
+        access_rooms = [
+            (i, r) for i, r in enumerate(self.rooms)
+            if getattr(r, "needs_corridor_access", True)
+        ]
+        access_rooms.sort(key=lambda ir: ir[1].target_area, reverse=True)
+
+        # INFEASIBLE 防护：边长不够时降级面积最小的房间
+        total_min_width = sum(r.min_width for _, r in access_rooms)
+        while access_rooms and total_min_width > edge_length:
+            idx, demoted = access_rooms.pop()
+            total_min_width -= demoted.min_width
+            logger.warning(
+                "Demoting %s from corridor attachment "
+                "(edge=%.1fm, needed=%.1fm)",
+                demoted.room_id, edge_length, total_min_width + demoted.min_width,
+            )
+
+        # 添加贴边硬约束
+        for i, room in access_rooms:
+            if primary_edge == "south":
+                model.Add(y[i] == 0)
+            elif primary_edge == "north":
+                model.Add(y[i] + d[i] == int(self.D * SCALE))
+            elif primary_edge == "west":
+                model.Add(x[i] == 0)
+            elif primary_edge == "east":
+                model.Add(x[i] + w[i] == int(self.W * SCALE))
+
+    # ----------------------------------------------------------
     # Stage 2a: CP-SAT 求解器
     # ----------------------------------------------------------
 
@@ -232,7 +342,7 @@ class IslandPartitionSolver:
     ) -> List[RoomResult]:
         """Google OR-Tools CP-SAT 求解"""
         try:
-            from ortools.sat.python import cp_model
+            from ortools.sat.python import cp_model  # type: ignore[import-not-found]
         except ImportError:
             raise RuntimeError(
                 "ortools not installed. Run: pip install ortools"
@@ -332,6 +442,11 @@ class IslandPartitionSolver:
 
         model.Minimize(sum(area_deviations))
 
+        # === 拓扑冻结：从 Treemap 提取正交相对位置 → 线性约束替代 Big-M ===
+        if warm_start and len(warm_start) >= 2:
+            relations = self._freeze_topology_from_treemap(warm_start)
+            self._add_frozen_topology_constraints(model, x, y, w, d, relations, SCALE)
+
         # === Warm Start Hints ===
         if warm_start:
             for i, ws in enumerate(warm_start):
@@ -377,8 +492,8 @@ class IslandPartitionSolver:
     ) -> List[RoomResult]:
         """Gurobi MIQP 求解，未安装时回退 CP-SAT"""
         try:
-            import gurobipy as gp
-            from gurobipy import GRB
+            import gurobipy as gp  # type: ignore[import-not-found]
+            from gurobipy import GRB  # type: ignore[import-not-found]
         except ImportError:
             logger.info("Gurobi not installed, falling back to CP-SAT")
             return self._solve_cpsat(warm_start)
@@ -715,7 +830,7 @@ class SemanticIslandPartitionSolver:
 
     def _solve_cpsat(self, warm_start: List[WarmStartRect]) -> List[RoomResult]:
         try:
-            from ortools.sat.python import cp_model
+            from ortools.sat.python import cp_model  # type: ignore[import-not-found]
         except ImportError:
             raise RuntimeError("ortools not installed. Run: pip install ortools")
 

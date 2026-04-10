@@ -83,7 +83,9 @@ def apply_size_hints(
         w = SIZE_HINT_WEIGHTS.get(hint, 2.0)
         room.target_area = distributable * (w / total_weight)
         min_area = _MIN_AREA_BY_TYPE.get(room.room_type, _DEFAULT_MIN_AREA)
-        room.target_area = max(room.target_area, min_area)
+        # round-up 保护：不低于 room_type 最小面积，也不低于 min_width × min_width
+        min_geometric = getattr(room, 'min_width', 2.5) ** 2
+        room.target_area = max(room.target_area, min_area, min_geometric)
 
 
 # ============================================================

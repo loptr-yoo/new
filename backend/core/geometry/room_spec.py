@@ -73,6 +73,9 @@ class RoomSpec:
     adjacency_preferred: List[str] = field(default_factory=list)
     adjacency_forbidden: List[str] = field(default_factory=list)
 
+    # 交通约束
+    needs_corridor_access: bool = True  # 是否需要贴合走廊边界（storage/utility 可为 False）
+
     # 权重
     area_priority: float = 1.0
 
@@ -169,10 +172,10 @@ ROOM_TYPE_DEFAULTS: Dict[str, Dict] = {
     "study": {"zone": ZoneType.PRIVATE, "needs_window": True, "ar": (0.6, 1.8)},
     "bathroom": {"zone": ZoneType.PRIVATE, "needs_window": False, "ar": (0.5, 2.0)},
     "toilet": {"zone": ZoneType.PRIVATE, "needs_window": False, "ar": (0.5, 2.0)},
-    # 服务区
-    "storage": {"zone": ZoneType.SERVICE, "needs_window": False, "ar": (0.5, 2.0)},
-    "laundry": {"zone": ZoneType.SERVICE, "needs_window": False, "ar": (0.5, 2.0)},
-    "utility": {"zone": ZoneType.SERVICE, "needs_window": False, "ar": (0.5, 2.0)},
+    # 服务区（不需要走廊直接入口）
+    "storage": {"zone": ZoneType.SERVICE, "needs_window": False, "ar": (0.5, 2.0), "needs_corridor_access": False},
+    "laundry": {"zone": ZoneType.SERVICE, "needs_window": False, "ar": (0.5, 2.0), "needs_corridor_access": False},
+    "utility": {"zone": ZoneType.SERVICE, "needs_window": False, "ar": (0.5, 2.0), "needs_corridor_access": False},
     # 交通区
     "corridor": {"zone": ZoneType.CIRCULATION, "needs_window": False, "ar": (0.2, 5.0)},
     "hallway": {"zone": ZoneType.CIRCULATION, "needs_window": False, "ar": (0.2, 5.0)},
@@ -203,5 +206,9 @@ def apply_room_type_defaults(spec: RoomSpec) -> RoomSpec:
     # aspect_ratio_range: 仅当为默认 (0.5, 2.0) 时覆盖
     if spec.aspect_ratio_range == (0.5, 2.0) and defaults["ar"] != (0.5, 2.0):
         spec.aspect_ratio_range = defaults["ar"]
+
+    # needs_corridor_access: 仅当 room_type 明确标记为 False 时覆盖
+    if "needs_corridor_access" in defaults and not defaults["needs_corridor_access"]:
+        spec.needs_corridor_access = False
 
     return spec

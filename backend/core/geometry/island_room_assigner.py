@@ -136,6 +136,12 @@ class IslandRoomAssigner:
                 for room in self.rooms.values():
                     room.target_area *= scale_factor
 
+        # round-up 保护：缩放后面积不低于 min_width × min_depth
+        for room in self.rooms.values():
+            min_viable = room.min_width * room.min_depth
+            if room.target_area < min_viable:
+                room.target_area = min_viable
+
         # 按优先级排序
         sorted_rooms = self._sort_rooms()
 

@@ -73,7 +73,7 @@ pnpm-debug.log*
 .cache/
 tmp_*
 *.tmp
-
+/artifacts/
 # =========================
 # 6. 环境变量与密钥 (Env)
 # =========================
@@ -125,4 +125,11 @@ backend/tests/test_semantic_partition.py
 backend/tests/test_step2.py
 backend/tests/test_step3.py
 backend/tests/test_treemap_miqp_pipeline.py
+backend/refactor_prompt.md
+artifacts/8.png
+artifacts/13.png
+artifacts/optimized_layout.svg
+docs/parking_layout_1775763875637.json
+artifacts/optimized_layout.svg
+backend/1.md
 backend/refactor_prompt.md

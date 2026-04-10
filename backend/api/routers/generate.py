@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from typing import Dict, Optional, Union
+from typing import Dict, Literal, Optional, Union
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import StreamingResponse
@@ -180,52 +180,83 @@ class BuildingGenerateRequest(_BaseModel):
     total_floors: Optional[int] = None
     floor_width: Optional[float] = None
     floor_depth: Optional[float] = None
-    provider: Optional[str] = None
+    provider: Optional[Literal["gemini", "deepseek", "openai"]] = None
     model: Optional[str] = None
 
 
 @router.post("/building/generate")
 async def generate_building_layout(req: BuildingGenerateRequest):
     """
-    端到端 Building 生成 API（同步返回）
+    端到端 Building 生成 API（两阶段错误隔离）
 
-    管线：LLM → BuildingAllocation → BuildingOrchestrator → 序列化 JSON
+    Phase 1: LLM → BuildingAllocation（语义规划）
+    Phase 2: BuildingAllocation → 几何求解 → 序列化 JSON
     """
+    import uuid
+
+    session_id = str(uuid.uuid4())[:8]
+
+    # Phase 1: LLM 语义规划
+    try:
+        allocation, parse_warnings = await asyncio.wait_for(
+            generate_building_semantics(
+                GenerateSemanticsRequest(
+                    scene_type=SceneType.BUILDING,
+                    user_prompt=req.prompt,
+                    total_area=req.total_area,
+                    total_floors=req.total_floors,
+                    provider=req.provider,
+                    model=req.model,
+                )
+            ),
+            timeout=60.0,
+        )
+        logger.info(
+            "[%s] LLM phase done: %d floors, %d warnings",
+            session_id, len(allocation.floors), len(parse_warnings),
+        )
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=504, detail="LLM phase timed out (60s)")
+    except Exception as e:
+        logger.exception("[%s] LLM phase failed", session_id)
+        raise HTTPException(
+            status_code=500,
+            detail=f"LLM phase failed: {str(e)}",
+            headers={"X-Phase": "llm", "X-Session": session_id},
+        )
+
+    # Phase 2: 几何求解 + 序列化
     try:
         result = await asyncio.wait_for(
-            _generate_building_pipeline(req),
-            timeout=120.0,
+            _generate_building_geometry(req, allocation, parse_warnings, session_id),
+            timeout=60.0,
         )
         return result
     except asyncio.TimeoutError:
-        raise HTTPException(status_code=504, detail="Generation timed out (120s)")
+        raise HTTPException(status_code=504, detail="Geometry phase timed out (60s)")
     except Exception as e:
-        logger.exception("Building generation failed")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.exception("[%s] Geometry phase failed", session_id)
+        raise HTTPException(
+            status_code=500,
+            detail=f"Geometry phase failed: {str(e)}",
+            headers={"X-Phase": "geometry", "X-Session": session_id},
+        )
 
 
-async def _generate_building_pipeline(req: BuildingGenerateRequest) -> dict:
-    """完整管线：LLM → 解析 → 几何 → 序列化"""
+async def _generate_building_geometry(
+    req: BuildingGenerateRequest,
+    allocation,
+    parse_warnings: list,
+    session_id: str,
+) -> dict:
+    """Phase 2: BuildingAllocation → 几何求解 → 序列化"""
     import math
     from shapely.geometry import box
 
     from ...core.geometry.building_orchestrator import BuildingOrchestrator
     from ...core.geometry.serializers import building_result_to_dict
-    from ...core.geometry.room_spec import SolverConfig
 
-    # 1. LLM → BuildingAllocation + parse warnings
-    allocation, parse_warnings = await generate_building_semantics(
-        GenerateSemanticsRequest(
-            scene_type=SceneType.BUILDING,
-            user_prompt=req.prompt,
-            total_area=req.total_area,
-            total_floors=req.total_floors,
-            provider=req.provider,
-            model=req.model,
-        )
-    )
-
-    # 2. 构建楼层边界
+    # 1. 构建楼层边界
     if req.floor_width and req.floor_depth:
         floor_boundary = box(0, 0, req.floor_width, req.floor_depth)
     else:
@@ -234,7 +265,7 @@ async def _generate_building_pipeline(req: BuildingGenerateRequest) -> dict:
         d = floor_area / w
         floor_boundary = box(0, 0, w, d)
 
-    # 3. 根据楼层面积动态调整参数（小楼层缩减走廊和核心筒）
+    # 2. 根据楼层面积动态调整参数
     floor_area = floor_boundary.area
     if floor_area < 200:
         corridor_width = 1.2
@@ -246,7 +277,7 @@ async def _generate_building_pipeline(req: BuildingGenerateRequest) -> dict:
         corridor_width = 2.0
         core_area_ratio = 0.08
 
-    # 4. BuildingOrchestrator → BuildingResult（CPU 密集，在线程池中运行）
+    # 3. BuildingOrchestrator → BuildingResult（CPU 密集，线程池）
     orchestrator = BuildingOrchestrator(
         floor_boundary=floor_boundary,
         corridor_width=corridor_width,
@@ -254,9 +285,9 @@ async def _generate_building_pipeline(req: BuildingGenerateRequest) -> dict:
     )
     building_result = await asyncio.to_thread(orchestrator.generate, allocation)
 
-    # 5. 序列化 + 合并 parse_warnings
+    # 4. 序列化
     result = building_result_to_dict(building_result, floor_boundary)
-    # 合并解析阶段的 warnings
+    result["session_id"] = session_id
     if parse_warnings:
         if "warnings" not in result:
             result["warnings"] = []

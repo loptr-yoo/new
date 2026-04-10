@@ -203,7 +203,7 @@ export async function generateBuildingV2(
   options: AIServiceOptions,
   signal?: AbortSignal,
 ): Promise<BuildingDataV2> {
-  const timeoutSignal = AbortSignal.timeout(60_000);
+  const timeoutSignal = AbortSignal.timeout(180_000);
   const combinedSignal = signal
     ? AbortSignal.any([signal, timeoutSignal])
     : timeoutSignal;
@@ -237,6 +237,23 @@ function getBoundsFromPolygon(pts: [number, number][]): [number, number, number,
 }
 
 /**
+ * 从墙体线段坐标计算带厚度的矩形 bounds
+ * 解决垂直/水平墙 width=0 或 height=0 导致 SVG 不渲染的问题
+ */
+function getWallBounds(coords: [number, number][], thickness: number = 0.2) {
+  const xs = coords.map(c => c[0]);
+  const ys = coords.map(c => c[1]);
+  const minX = Math.min(...xs), maxX = Math.max(...xs);
+  const minY = Math.min(...ys), maxY = Math.max(...ys);
+  return {
+    x: maxX - minX === 0 ? minX - thickness / 2 : minX,
+    y: maxY - minY === 0 ? minY - thickness / 2 : minY,
+    width:  maxX - minX === 0 ? thickness : maxX - minX,
+    height: maxY - minY === 0 ? thickness : maxY - minY,
+  };
+}
+
+/**
  * 楼层 ID 数字排序（F1, F2, F3... 而非字符串排序 F1, F10, F2）
  */
 function sortFloorIds(ids: string[]): string[] {
@@ -259,20 +276,55 @@ export function convertV2ToBuildingData(v2: BuildingDataV2): BuildingData {
     const floorData = v2.building.floors[floorId];
     const elements: LayoutElement[] = [];
 
+    // 楼板背景（最底层）
+    if (floorData.floor_slab) {
+      const slab = floorData.floor_slab;
+      const [minX, minY, maxX, maxY] = getBoundsFromPolygon(slab.polygon);
+      elements.push({
+        id: `${floorId}_floor_slab`,
+        type: 'floor_slab',
+        polygon: slab.polygon,
+        x: minX,
+        y: minY,
+        width: maxX - minX,
+        height: maxY - minY,
+      });
+    }
+
+    // 走廊
+    for (const corridor of (floorData.corridors || [])) {
+      const [minX, minY, maxX, maxY] = getBoundsFromPolygon(corridor.polygon);
+      elements.push({
+        id: corridor.id,
+        type: 'corridor',
+        polygon: corridor.polygon,
+        x: minX,
+        y: minY,
+        width: maxX - minX,
+        height: maxY - minY,
+      });
+    }
+
+    // ====== Z-Order: SVG 没有 z-index，DOM 插入顺序 = 层叠顺序 ======
+    // push 顺序：rooms → core_tube → walls → doors → windows
+    // （floor_slab 和 corridors 已在上方 push，作为最底层）
+
+    // Layer 3: 房间（带极细线兜底）
     for (const room of floorData.rooms) {
+      const [minX, minY, maxX, maxY] = getBoundsFromPolygon(room.polygon);
       elements.push({
         id: room.room_id,
         type: room.room_type,
         polygon: room.polygon,
-        x: room.center[0] - room.width / 2,
-        y: room.center[1] - room.depth / 2,
-        width: room.width,
-        height: room.depth,
+        x: minX,
+        y: minY,
+        width: maxX - minX,
+        height: maxY - minY,
         label: room.room_id,
       });
     }
 
-    // 核心筒子区域
+    // Layer 4: 核心筒子区域（elevator + staircase）
     if (v2.core_tube?.elevator) {
       const [minX, minY, maxX, maxY] = getBoundsFromPolygon(v2.core_tube.elevator.polygon);
       elements.push({
@@ -291,6 +343,66 @@ export function convertV2ToBuildingData(v2: BuildingDataV2): BuildingData {
         polygon: v2.core_tube.staircase.polygon,
         x: minX, y: minY,
         width: maxX - minX, height: maxY - minY,
+      });
+    }
+    if (!v2.core_tube?.elevator && !v2.core_tube?.staircase && v2.core_tube?.boundary) {
+      const [minX, minY, maxX, maxY] = getBoundsFromPolygon(v2.core_tube.boundary);
+      elements.push({
+        id: `${floorId}_core_tube`,
+        type: 'elevator',
+        polygon: v2.core_tube.boundary,
+        x: minX, y: minY,
+        width: maxX - minX, height: maxY - minY,
+      });
+    }
+
+    // Layer 5: 墙体（优先 polygon 精确渲染，fallback 到 getWallBounds）
+    for (const wall of (floorData.walls || [])) {
+      if (wall.polygon && wall.polygon.length >= 3) {
+        const [minX, minY, maxX, maxY] = getBoundsFromPolygon(wall.polygon);
+        elements.push({
+          id: `${floorId}_wall_${elements.length}`,
+          type: wall.type,
+          polygon: wall.polygon,
+          x: minX, y: minY,
+          width: maxX - minX, height: maxY - minY,
+        });
+      } else if (wall.coords && wall.coords.length >= 2) {
+        elements.push({
+          id: `${floorId}_wall_${elements.length}`,
+          type: wall.type,
+          ...getWallBounds(wall.coords, wall.thickness || 0.2),
+        });
+      }
+    }
+
+    // Layer 6: 门窗（最顶层）— 响应式视觉厚度
+    const floorMinDim = Math.min(v2.building.width, v2.building.depth);
+    const VISUAL_THICKNESS = Math.max(0.3, floorMinDim * 0.025);
+
+    for (const door of (floorData.doors || [])) {
+      const isVertical = (door.rotation ?? 0) === 90;
+      const halfT = VISUAL_THICKNESS / 2;
+      elements.push({
+        id: `${floorId}_door_${elements.length}`,
+        type: 'door',
+        x: isVertical ? door.position[0] - halfT : door.position[0] - door.width / 2,
+        y: isVertical ? door.position[1] - door.width / 2 : door.position[1] - halfT,
+        width:  isVertical ? VISUAL_THICKNESS : door.width,
+        height: isVertical ? door.width : VISUAL_THICKNESS,
+      });
+    }
+
+    for (const win of (floorData.windows || [])) {
+      const isVertical = (win.rotation ?? 0) === 90;
+      const halfT = VISUAL_THICKNESS / 2;
+      elements.push({
+        id: `${floorId}_window_${elements.length}`,
+        type: 'window',
+        x: isVertical ? win.position[0] - halfT : win.position[0] - win.width / 2,
+        y: isVertical ? win.position[1] - win.width / 2 : win.position[1] - halfT,
+        width:  isVertical ? VISUAL_THICKNESS : win.width,
+        height: isVertical ? win.width : VISUAL_THICKNESS,
       });
     }
 

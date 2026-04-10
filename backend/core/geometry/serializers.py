@@ -14,11 +14,16 @@ from .layout_generator import LayoutResultV2, RoomResult
 from .postprocessor import (
     PostprocessResult,
     door_to_dict,
+    generate_doors,
+    generate_walls_from_topology,
+    generate_wall_mesh,
+    generate_windows,
+    generate_windows_from_exterior_walls,
     postprocess_floor,
     wall_to_dict,
     window_to_dict,
 )
-from .topology_generator import CoreTube
+from .topology_generator import CoreTube, Corridor
 
 
 def room_result_to_dict(room: RoomResult, floor_id: str) -> dict:
@@ -86,6 +91,40 @@ def core_tube_to_dict(core_tube: Any) -> dict:
     return result
 
 
+def corridor_to_dict(corridor: Corridor) -> dict:
+    """Corridor → 可序列化 dict"""
+    coords = list(corridor.polygon.exterior.coords)
+    minx, miny, maxx, maxy = corridor.polygon.bounds
+    return {
+        "id": corridor.id,
+        "type": "corridor",
+        "polygon": [[round(x, 2), round(y, 2)] for x, y in coords],
+        "center": [
+            round((minx + maxx) / 2, 2),
+            round((miny + maxy) / 2, 2),
+        ],
+        "width": round(maxx - minx, 2),
+        "depth": round(maxy - miny, 2),
+        "area": round(corridor.polygon.area, 2),
+        "orientation": corridor.orientation,
+    }
+
+
+def floor_slab_to_dict(floor_boundary: Polygon) -> dict:
+    """楼层边界 → floor_slab 元素 dict"""
+    coords = list(floor_boundary.exterior.coords)
+    minx, miny, maxx, maxy = floor_boundary.bounds
+    return {
+        "id": "floor_slab",
+        "type": "floor_slab",
+        "polygon": [[round(x, 2), round(y, 2)] for x, y in coords],
+        "center": [round((minx + maxx) / 2, 2), round((miny + maxy) / 2, 2)],
+        "width": round(maxx - minx, 2),
+        "depth": round(maxy - miny, 2),
+        "area": round(floor_boundary.area, 2),
+    }
+
+
 def _postprocess_to_dict(pp: PostprocessResult) -> dict:
     """PostprocessResult → 可序列化 dict"""
     return {
@@ -106,13 +145,74 @@ def building_result_to_dict(
     for floor_id, layout in result.floor_layouts.items():
         rooms = [room_result_to_dict(r, floor_id) for r in layout.room_layouts]
 
-        # 后处理：自动生成墙/门/窗
-        pp = postprocess_floor(layout.room_layouts, floor_boundary)
+        # 走廊序列化
+        corridors = []
+        if hasattr(layout, "corridors") and layout.corridors:
+            for c in layout.corridors:
+                try:
+                    corridors.append(corridor_to_dict(c))
+                except Exception:
+                    pass
+
+        # 楼板背景
+        slab = floor_slab_to_dict(floor_boundary)
+
+        room_rects: Dict[str, tuple] = {}
+        zone_types: Dict[str, str] = {}
+
+        if layout.core_tube is not None and hasattr(layout.core_tube, "polygon") and not layout.core_tube.polygon.is_empty:
+            minx, miny, maxx, maxy = layout.core_tube.polygon.bounds
+            room_rects["core_tube"] = (float(minx), float(miny), float(maxx - minx), float(maxy - miny))
+            zone_types["core_tube"] = "core"
+
+        if hasattr(layout, "corridors") and layout.corridors:
+            for c in layout.corridors:
+                if hasattr(c, "polygon") and not c.polygon.is_empty:
+                    minx, miny, maxx, maxy = c.polygon.bounds
+                    room_rects[c.id] = (float(minx), float(miny), float(maxx - minx), float(maxy - miny))
+                    zone_types[c.id] = "corridor"
+
+        for r in layout.room_layouts:
+            if r.polygon.is_empty:
+                continue
+            minx, miny, maxx, maxy = r.polygon.bounds
+            room_rects[r.id] = (float(minx), float(miny), float(maxx - minx), float(maxy - miny))
+            zone_types[r.id] = "room"
+
+        edge_set = getattr(layout, "edge_set", None)
+        if edge_set and room_rects:
+            pp_walls = generate_walls_from_topology(
+                room_rects=room_rects,
+                edge_set=edge_set,
+                floor_bounds=floor_boundary.bounds,
+            )
+        else:
+            pp_walls = generate_wall_mesh(
+                rooms=layout.room_layouts,
+                corridors=layout.corridors if hasattr(layout, 'corridors') else [],
+                core_tube=layout.core_tube,
+                floor_boundary=floor_boundary,
+            )
+
+        rooms_needing_window = set()
+        for room in layout.room_layouts:
+            room_id = getattr(room, "id", getattr(room, "room_id", "?"))
+            has_window = getattr(room, "has_window", False) or getattr(room, "needs_window", False)
+            if has_window:
+                rooms_needing_window.add(room_id)
+
+        pp_doors = generate_doors(pp_walls, zone_types=zone_types, zone_rects=room_rects)
+        exterior_walls = [w for w in pp_walls if w.type == "exterior_wall"]
+        pp_windows = generate_windows_from_exterior_walls(exterior_walls, rooms_needing_window)
 
         floors[floor_id] = {
             "floor_name": floor_id,
+            "floor_slab": slab,
+            "corridors": corridors,
             "rooms": rooms,
-            **_postprocess_to_dict(pp),
+            "walls": [wall_to_dict(w) for w in pp_walls],
+            "doors": [door_to_dict(d) for d in pp_doors],
+            "windows": [window_to_dict(w) for w in pp_windows],
             "generation_time_ms": round(layout.generation_time_ms, 1),
             "warnings": layout.warnings,
         }

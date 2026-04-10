@@ -10,7 +10,7 @@ export function useLLMStream() {
 
   const translateError = (err: any): ErrorResult => {
     const msg = err?.message || String(err);
-    if (msg.includes('AbortError') || err.name === 'AbortError' || msg.includes('Idle Timeout')) {
+    if (msg.includes('AbortError') || err.name === 'AbortError' || msg.includes('Idle Timeout')|| msg.includes('timed out')) {
       return { message: '请求已取消或超时。', isUserCanceled: true };
     }
     if (msg.includes('401') || msg.toLowerCase().includes('auth')) {

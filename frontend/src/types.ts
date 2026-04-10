@@ -114,6 +114,10 @@ export type ElementDrawer = (
 
 export type LayoutAlgorithm = (layout: ParkingLayout) => ParkingLayout;
 
+export type SceneBackgroundConfig =
+  | { mode: 'fixed'; color: string }
+  | { mode: 'styleKey'; styleKey: string; fallbackColor?: string };
+
 export interface SceneDefinition {
   id: string;
   name: string;
@@ -125,6 +129,7 @@ export interface SceneDefinition {
     exampleJSON: string;
   };
   styles: Record<string, ElementStyle>;
+  background?: SceneBackgroundConfig;
   customDrawers?: Record<string, ElementDrawer>;
   zOrder?: string[];
   elementNormalization?: Record<string, string>;
@@ -171,9 +176,67 @@ export interface CoreTubeV2 {
   staircase?: { polygon: [number, number][]; area: number };
 }
 
+export interface WallV2 {
+  type: string;                    // 'exterior_wall' | 'partition_wall'
+  coords: [number, number][];
+  polygon?: [number, number][];    // buffer 后的精确矩形 polygon
+  thickness: number;
+  length: number;
+  room_ids: string[];
+}
+
+export interface DoorV2 {
+  position: [number, number];
+  width: number;
+  connects: string[];
+  rotation?: number;               // 0=水平, 90=垂直
+}
+
+export interface WindowV2 {
+  position: [number, number];
+  width: number;
+  room_id: string;
+  rotation?: number;
+}
+
+export interface DegradationSummary {
+  total_degradations: number;
+  skipped_rooms: string[];
+  miqp_fallback_floors: string[];
+  adjacency_dropped: number;
+  unreachable_rooms: string[];
+  parse_fixes: number;
+}
+
+export interface CorridorV2 {
+  id: string;
+  type: string;
+  polygon: [number, number][];
+  center: [number, number];
+  width: number;
+  depth: number;
+  area: number;
+  orientation: string;
+}
+
+export interface FloorSlabV2 {
+  id: string;
+  type: string;
+  polygon: [number, number][];
+  center: [number, number];
+  width: number;
+  depth: number;
+  area: number;
+}
+
 export interface BuildingFloorV2 {
   floor_name: string;
+  floor_slab?: FloorSlabV2;
+  corridors?: CorridorV2[];
   rooms: RoomResultV2[];
+  walls?: WallV2[];
+  doors?: DoorV2[];
+  windows?: WindowV2[];
   generation_time_ms: number;
   warnings: string[];
 }
@@ -186,4 +249,5 @@ export interface BuildingDataV2 {
   };
   core_tube: CoreTubeV2 | null;
   warnings: string[];
+  degradation_summary?: DegradationSummary;
 }

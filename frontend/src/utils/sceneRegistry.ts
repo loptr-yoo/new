@@ -97,6 +97,7 @@ export const ParkingScene: SceneDefinition = {
 }`
   },
   styles: createParkingSceneStyles(),
+  background: { mode: 'fixed', color: '#020617' },
   zOrder: parkingZOrder,
   elementNormalization: {
     column: ElementType.PILLAR,
@@ -147,6 +148,7 @@ export const GenericScene: SceneDefinition = {
     object: { fill: '#f59e0b', opacity: 1 },
     zone: { fill: '#7c3aed', opacity: 0.6 }
   },
+  background: { mode: 'fixed', color: '#020617' },
   zOrder: ['floor', 'grass', 'park', 'water', 'road', 'building', 'wall', 'zone', 'object']
 };
 
@@ -161,6 +163,7 @@ export const FloorPlanScene: SceneDefinition = {
     exampleJSON: floorPlanExamples.complexLayout
   },
   styles: createFloorPlanSceneStyles(),
+  background: { mode: 'styleKey', styleKey: 'floor_slab', fallbackColor: '#020617' },
   customDrawers: {
       [ElementType.STAIRCASE]: (g, element, style, _context) => {
           const w = element.width;
@@ -218,6 +221,15 @@ export const FloorPlanScene: SceneDefinition = {
       mep_room: 'utility',
       janitor: 'utility',
       janitor_closet: 'utility',
+      // 卧室变体
+      master_bedroom: 'bedroom',
+      guest_bedroom: 'bedroom',
+      child_room: 'bedroom',
+      // 餐厅变体
+      dining: 'dining_room',
+      // 书房变体
+      study: 'study',
+      library: 'study',
       // 走廊变体
       hallway: 'corridor',
       passage: 'corridor',

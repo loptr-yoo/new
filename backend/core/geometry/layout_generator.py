@@ -15,7 +15,7 @@ import logging
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, FrozenSet, List, Optional, Tuple, Union
 
 import numpy as np
 from shapely.geometry import Point, Polygon
@@ -139,7 +139,7 @@ def _convert_room_spec(old: RoomSpec) -> MIQPRoomSpec:
         target_area=old.target_area,
         area_tolerance=tolerance,
         min_width=old.min_width,
-        min_depth=old.min_width,
+        min_depth=getattr(old, 'min_depth', old.min_width),
         adjacency_required=list(old.adjacent_to),
         adjacency_forbidden=list(old.not_adjacent_to),
         window_access=old.requires_window,
@@ -496,6 +496,9 @@ class LayoutResultV2:
     generation_time_ms: float
     warnings: List[str] = field(default_factory=list)
 
+    # 拓扑边（最终房间层 edge_set）
+    edge_set: Dict[FrozenSet[str], str] = field(default_factory=dict)
+
     @property
     def is_valid(self) -> bool:
         return self.validation.is_valid and len(self.warnings) == 0
@@ -555,10 +558,10 @@ def check_connectivity(
             rid_a, poly_a = all_items[i]
             rid_b, poly_b = all_items[j]
             try:
-                shared = poly_a.buffer(buffer_tolerance).intersection(
+                shared_boundary = poly_a.boundary.intersection(
                     poly_b.buffer(buffer_tolerance)
                 )
-                if shared.length > min_shared_length:
+                if hasattr(shared_boundary, 'length') and shared_boundary.length > min_shared_length:
                     adj[rid_a].add(rid_b)
                     adj[rid_b].add(rid_a)
             except Exception:
@@ -580,6 +583,67 @@ def check_connectivity(
 
     unreachable = [rid for rid, _ in room_polygons if rid not in visited]
     return unreachable
+
+
+def _build_edge_set_from_rects(
+    rects: Dict[str, Tuple[float, float, float, float]],
+    tol: float = 0.01,
+    min_shared_length: float = 0.3,
+) -> Dict[FrozenSet[str], str]:
+    edge_set: Dict[FrozenSet[str], str] = {}
+    ids = list(rects.keys())
+
+    for i in range(len(ids)):
+        id_a = ids[i]
+        ax, ay, aw, ah = rects[id_a]
+        for j in range(i + 1, len(ids)):
+            id_b = ids[j]
+            bx, by, bw, bh = rects[id_b]
+
+            if abs(ax + aw - bx) < tol or abs(bx + bw - ax) < tol:
+                y0 = max(ay, by)
+                y1 = min(ay + ah, by + bh)
+                if (y1 - y0) > min_shared_length:
+                    edge_set[frozenset({id_a, id_b})] = "vertical"
+                continue
+
+            if abs(ay + ah - by) < tol or abs(by + bh - ay) < tol:
+                x0 = max(ax, bx)
+                x1 = min(ax + aw, bx + bw)
+                if (x1 - x0) > min_shared_length:
+                    edge_set[frozenset({id_a, id_b})] = "horizontal"
+
+    return edge_set
+
+
+def check_connectivity_topological(
+    edge_set: Dict[FrozenSet[str], str],
+    all_zone_ids: List[str],
+    entrance_zone_id: Optional[str] = None,
+) -> List[str]:
+    adj: Dict[str, set] = {z: set() for z in all_zone_ids}
+    for edge_key in edge_set.keys():
+        id_a, id_b = tuple(edge_key)
+        if id_a in adj and id_b in adj:
+            adj[id_a].add(id_b)
+            adj[id_b].add(id_a)
+
+    start = entrance_zone_id
+    if start is None:
+        start = next((z for z in all_zone_ids if "corridor" in z), all_zone_ids[0] if all_zone_ids else None)
+    if start is None or start not in adj:
+        return list(all_zone_ids)
+
+    visited = set()
+    queue = deque([start])
+    while queue:
+        node = queue.popleft()
+        if node in visited:
+            continue
+        visited.add(node)
+        queue.extend(adj[node] - visited)
+
+    return [z for z in all_zone_ids if z not in visited]
 
 
 def generate_layout_v2(
@@ -824,12 +888,27 @@ def generate_layout_v2(
             aspect_ratio=aspect,
         ))
 
-    # ========== Phase 6: 连通性检查 ==========
-    core_poly = core_tube.polygon if core_tube is not None else None
-    room_polys = [(r.id, r.polygon) for r in rooms if not r.polygon.is_empty]
-    unreachable = check_connectivity(room_polys, core_poly)
-    if unreachable:
-        warnings.append(f"Unreachable rooms: {unreachable}")
+    # ========== Phase 6: 连通性检查（拓扑 BFS，零浮点缓冲） ==========
+    rects: Dict[str, Tuple[float, float, float, float]] = {}
+    if core_tube is not None and not core_tube.polygon.is_empty:
+        minx, miny, maxx, maxy = core_tube.polygon.bounds
+        rects["core_tube"] = (float(minx), float(miny), float(maxx - minx), float(maxy - miny))
+    for c in corridors:
+        if hasattr(c, "polygon") and c.polygon is not None and not c.polygon.is_empty:
+            minx, miny, maxx, maxy = c.polygon.bounds
+            rects[c.id] = (float(minx), float(miny), float(maxx - minx), float(maxy - miny))
+    room_ids = []
+    for r in rooms:
+        if not r.polygon.is_empty:
+            minx, miny, maxx, maxy = r.polygon.bounds
+            rects[r.id] = (float(minx), float(miny), float(maxx - minx), float(maxy - miny))
+            room_ids.append(r.id)
+
+    edge_set = _build_edge_set_from_rects(rects)
+    unreachable_zones = check_connectivity_topological(edge_set, list(rects.keys()))
+    unreachable_rooms = [z for z in unreachable_zones if z in room_ids]
+    if unreachable_rooms:
+        warnings.append(f"Unreachable rooms: {unreachable_rooms}")
 
     return LayoutResultV2(
         core_tube=core_tube,
@@ -837,6 +916,7 @@ def generate_layout_v2(
         islands=islands,
         assignments=assignments,
         room_layouts=rooms,
+        edge_set=edge_set,
         validation=report,
         generation_time_ms=elapsed_ms,
         warnings=warnings,

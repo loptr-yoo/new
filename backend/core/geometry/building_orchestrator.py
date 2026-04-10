@@ -58,7 +58,7 @@ class BuildingOrchestrator:
         config: Optional[SolverConfig] = None,
         corridor_width: float = 2.0,
         core_area_ratio: float = 0.08,
-        corridor_layout: str = "cross",
+        corridor_layout: str = "door_side",
     ):
         self.floor_boundary = floor_boundary
         self.config = config or SolverConfig()
@@ -164,7 +164,7 @@ class BuildingOrchestrator:
                 zone=zone,
                 needs_window=needs_window,
                 min_width=room.min_width,
-                min_depth=room.min_width,
+                min_depth=getattr(room, 'min_depth', room.min_width),
                 aspect_ratio_range=aspect_ratio_range,
                 adjacency_required=list(room.adjacency_required),
                 adjacency_preferred=list(room.adjacency_preferred),
