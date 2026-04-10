@@ -324,7 +324,19 @@ export function convertV2ToBuildingData(v2: BuildingDataV2): BuildingData {
       });
     }
 
-    // Layer 4: 核心筒子区域（elevator + staircase）
+    // Layer 4a: 核心筒底色（不透明，遮挡走廊穿透效果）
+    if (v2.core_tube?.boundary) {
+      const [minX, minY, maxX, maxY] = getBoundsFromPolygon(v2.core_tube.boundary);
+      elements.push({
+        id: `${floorId}_core_bg`,
+        type: 'floor_slab',
+        polygon: v2.core_tube.boundary,
+        x: minX, y: minY,
+        width: maxX - minX, height: maxY - minY,
+      });
+    }
+
+    // Layer 4b: 核心筒子区域（elevator + staircase，画在底色上方）
     if (v2.core_tube?.elevator) {
       const [minX, minY, maxX, maxY] = getBoundsFromPolygon(v2.core_tube.elevator.polygon);
       elements.push({
