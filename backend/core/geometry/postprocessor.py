@@ -412,11 +412,8 @@ def generate_doors(
     """
     doors: List[DoorPlacement] = []
 
-    allowed_pairs = {
-        frozenset({"room", "corridor"}),
-        frozenset({"room", "room"}),
-        frozenset({"corridor", "core"}),
-    }
+    def _is_room(zt: str) -> bool:
+        return zt not in ("corridor", "core", "elevator", "staircase")
 
     margin = 0.2
 
@@ -448,10 +445,16 @@ def generate_doors(
             a, b = wall.room_ids[0], wall.room_ids[1]
             type_a = zone_types.get(a, "room")
             type_b = zone_types.get(b, "room")
-            pair = frozenset({type_a, type_b})
-            if pair not in allowed_pairs:
+            legal = (
+                (_is_room(type_a) and type_b == "corridor") or
+                (_is_room(type_b) and type_a == "corridor") or
+                (_is_room(type_a) and _is_room(type_b)) or
+                (type_a == "corridor" and type_b == "core") or
+                (type_b == "corridor" and type_a == "core")
+            )
+            if not legal:
                 continue
-            if "core" in pair and zone_rects is not None:
+            if "core" in (type_a, type_b) and zone_rects is not None:
                 core_id = a if type_a == "core" else (b if type_b == "core" else None)
                 if core_id and core_id in zone_rects:
                     _cx, cy, _cw, _ch = zone_rects[core_id]
@@ -486,7 +489,7 @@ def generate_doors(
             ))
         return doors
 
-    room_ids = [zid for zid, zt in zone_types.items() if zt == "room"]
+    room_ids = [zid for zid, zt in zone_types.items() if _is_room(zt)]
     for rid in room_ids:
         room_candidates = [w for w in candidates if rid in w.room_ids]
         if not room_candidates:
@@ -528,8 +531,9 @@ def generate_doors(
     core_candidates = []
     for w in candidates:
         a, b = w.room_ids[0], w.room_ids[1]
-        pair = frozenset({zone_types.get(a, "room"), zone_types.get(b, "room")})
-        if pair == frozenset({"corridor", "core"}):
+        type_a = zone_types.get(a, "room")
+        type_b = zone_types.get(b, "room")
+        if (type_a == "corridor" and type_b == "core") or (type_b == "corridor" and type_a == "core"):
             core_candidates.append(w)
     if core_candidates:
         chosen = max(core_candidates, key=lambda w: w.length)

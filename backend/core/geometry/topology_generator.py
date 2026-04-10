@@ -407,16 +407,6 @@ class RectangularTopologyGenerator:
         xs = {round(fminx, 2), round(fmaxx, 2)}
         ys = {round(fminy, 2), round(fmaxy, 2)}
 
-        step = 0.5
-        x = fminx
-        while x <= fmaxx + 1e-9:
-            xs.add(round(x, 2))
-            x += step
-        y = fminy
-        while y <= fmaxy + 1e-9:
-            ys.add(round(y, 2))
-            y += step
-
         def collect_coords(g) -> None:
             if g.is_empty:
                 return
@@ -441,11 +431,11 @@ class RectangularTopologyGenerator:
 
         for i in range(len(xs_list) - 1):
             x0, x1 = xs_list[i], xs_list[i + 1]
-            if (x1 - x0) < step - 1e-9:
+            if (x1 - x0) < 0.05:
                 continue
             for j in range(len(ys_list) - 1):
                 y0, y1 = ys_list[j], ys_list[j + 1]
-                if (y1 - y0) < step - 1e-9:
+                if (y1 - y0) < 0.05:
                     continue
 
                 cell = box(x0, y0, x1, y1)
