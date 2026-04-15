@@ -315,7 +315,7 @@ class RectangularTopologyGenerator:
         cut_corridors: List[Corridor] = []
         for corridor in corridors:
             try:
-                diff = corridor.polygon.difference(core_poly_for_cut)
+                diff = corridor.polygon.difference(core_poly_for_cut).simplify(0.01)
             except Exception:
                 diff = corridor.polygon
 

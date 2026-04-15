@@ -12,14 +12,18 @@ import logging
 from dataclasses import dataclass, field
 from typing import Dict, FrozenSet, List, Optional, Set, Tuple
 
+import numpy as np
 from shapely.geometry import (
+    CAP_STYLE,
     GeometryCollection,
+    JOIN_STYLE,
     LineString,
     LinearRing,
     MultiLineString,
     MultiPolygon,
     Point,
     Polygon,
+    box,
 )
 from shapely.geometry.base import BaseGeometry
 
@@ -161,6 +165,18 @@ def generate_walls_from_topology(
     walls: List[WallSegment] = []
     fminx, fminy, fmaxx, fmaxy = floor_bounds
 
+    floor_poly = box(fminx, fminy, fmaxx, fmaxy)
+
+    def _clip_line_to_floor(line: LineString) -> LineString:
+        try:
+            clipped = line.intersection(floor_poly)
+        except Exception:
+            return line
+        candidates = _extract_linestrings(clipped)
+        if not candidates:
+            return line
+        return max(candidates, key=lambda s: s.length)
+
     for edge_key, orientation in edge_set.items():
         id_a, id_b = tuple(edge_key)
         if id_a not in room_rects or id_b not in room_rects:
@@ -173,9 +189,11 @@ def generate_walls_from_topology(
             y0 = max(ay, by)
             y1 = min(ay + ah, by + bh)
             if (y1 - y0) > min_wall_length:
+                line = _extend_line(LineString([(shared_x, y0), (shared_x, y1)]), wall_thickness / 2)
+                line = _clip_line_to_floor(line)
                 walls.append(WallSegment(
                     type="partition_wall",
-                    geometry=LineString([(shared_x, y0), (shared_x, y1)]),
+                    geometry=line,
                     thickness=wall_thickness,
                     room_ids=[id_a, id_b],
                 ))
@@ -184,42 +202,16 @@ def generate_walls_from_topology(
             x0 = max(ax, bx)
             x1 = min(ax + aw, bx + bw)
             if (x1 - x0) > min_wall_length:
+                line = _extend_line(LineString([(x0, shared_y), (x1, shared_y)]), wall_thickness / 2)
+                line = _clip_line_to_floor(line)
                 walls.append(WallSegment(
                     type="partition_wall",
-                    geometry=LineString([(x0, shared_y), (x1, shared_y)]),
+                    geometry=line,
                     thickness=wall_thickness,
                     room_ids=[id_a, id_b],
                 ))
 
-    for rid, (rx, ry, rw, rh) in room_rects.items():
-        if abs(rx - fminx) < 0.01 and rh > min_wall_length:
-            walls.append(WallSegment(
-                type="exterior_wall",
-                thickness=exterior_thickness,
-                geometry=LineString([(rx, ry), (rx, ry + rh)]),
-                room_ids=[rid],
-            ))
-        if abs(rx + rw - fmaxx) < 0.01 and rh > min_wall_length:
-            walls.append(WallSegment(
-                type="exterior_wall",
-                thickness=exterior_thickness,
-                geometry=LineString([(rx + rw, ry), (rx + rw, ry + rh)]),
-                room_ids=[rid],
-            ))
-        if abs(ry - fminy) < 0.01 and rw > min_wall_length:
-            walls.append(WallSegment(
-                type="exterior_wall",
-                thickness=exterior_thickness,
-                geometry=LineString([(rx, ry), (rx + rw, ry)]),
-                room_ids=[rid],
-            ))
-        if abs(ry + rh - fmaxy) < 0.01 and rw > min_wall_length:
-            walls.append(WallSegment(
-                type="exterior_wall",
-                thickness=exterior_thickness,
-                geometry=LineString([(rx, ry + rh), (rx + rw, ry + rh)]),
-                room_ids=[rid],
-            ))
+    walls.extend(_generate_exterior_wall_pieces(floor_poly, exterior_thickness))
 
     return _dedup_walls(walls)
 
@@ -259,6 +251,85 @@ def _extract_linestrings(geom) -> List[LineString]:
             result.extend(_extract_linestrings(g))
         return result
     return []
+
+
+def _extend_line(line: LineString, extension_dist: float) -> LineString:
+    coords = list(line.coords)
+    if len(coords) < 2:
+        return line
+    p0 = np.array(coords[0], dtype=float)
+    p1 = np.array(coords[-1], dtype=float)
+    v = p1 - p0
+    length = float(np.linalg.norm(v))
+    if length < 1e-6:
+        return line
+    unit_dir = v / length
+    new_p0 = p0 - unit_dir * float(extension_dist)
+    new_p1 = p1 + unit_dir * float(extension_dist)
+    return LineString([(float(new_p0[0]), float(new_p0[1])), (float(new_p1[0]), float(new_p1[1]))])
+
+
+def _clean_geom(geom: BaseGeometry) -> BaseGeometry:
+    try:
+        return geom.buffer(0)
+    except Exception:
+        return geom
+
+
+def _extract_polygons(geom: BaseGeometry, min_area: float = 1e-4) -> List[Polygon]:
+    if geom.is_empty:
+        return []
+    if isinstance(geom, Polygon):
+        return [geom] if geom.area > min_area else []
+    if isinstance(geom, MultiPolygon):
+        return [p for p in geom.geoms if p.area > min_area]
+    geoms = getattr(geom, "geoms", None)
+    if geoms is not None:
+        out: List[Polygon] = []
+        for g in geoms:
+            out.extend(_extract_polygons(g, min_area=min_area))
+        return out
+    return []
+
+
+def _generate_exterior_wall_pieces(floor_poly: Polygon, thickness: float) -> List[WallSegment]:
+    if thickness <= 0:
+        return []
+    outer = floor_poly
+    try:
+        inner = outer.buffer(-thickness, join_style=JOIN_STYLE.mitre)
+    except Exception:
+        inner = Polygon()
+    try:
+        ring = outer if inner.is_empty else outer.difference(inner)
+    except Exception:
+        ring = outer
+    ring = _clean_geom(ring)
+
+    minx, miny, maxx, maxy = outer.bounds
+    t = float(thickness)
+    strips = [
+        box(minx, maxy - t, maxx, maxy),
+        box(minx, miny, maxx, miny + t),
+        box(minx, miny + t, minx + t, maxy - t),
+        box(maxx - t, miny + t, maxx, maxy - t),
+    ]
+
+    out_walls: List[WallSegment] = []
+    for strip in strips:
+        try:
+            piece = ring.intersection(strip)
+        except Exception:
+            continue
+        piece = _clean_geom(piece)
+        for poly in _extract_polygons(piece, min_area=1e-4):
+            out_walls.append(WallSegment(
+                type="exterior_wall",
+                geometry=poly,
+                thickness=thickness,
+                room_ids=["__exterior__"],
+            ))
+    return out_walls
 
 
 def generate_wall_mesh(
@@ -303,24 +374,7 @@ def generate_wall_mesh(
         all_zones.append(("core", "core_tube", core_tube.polygon))
 
     walls: List[WallSegment] = []
-    floor_buf = floor_boundary.boundary.buffer(boundary_tolerance)
-
-    # 外墙：每个区域与楼层边界的共享边
-    for type_a, id_a, poly_a in all_zones:
-        try:
-            shared = poly_a.boundary.intersection(floor_buf)
-            if shared.is_empty:
-                continue
-            for line in _extract_linestrings(shared):
-                if line.length > min_wall_length:
-                    walls.append(WallSegment(
-                        type="exterior_wall",
-                        geometry=line,
-                        thickness=exterior_thickness,
-                        room_ids=[id_a],
-                    ))
-        except Exception as e:
-            logger.debug(f"Exterior wall failed for {id_a}: {e}")
+    walls.extend(_generate_exterior_wall_pieces(floor_boundary, exterior_thickness))
 
     # 内墙：所有区域两两比较
     for i in range(len(all_zones)):
@@ -335,9 +389,17 @@ def generate_wall_mesh(
                     continue
                 for line in _extract_linestrings(shared):
                     if line.length > min_wall_length:
+                        ext = _extend_line(line, wall_thickness / 2)
+                        try:
+                            clipped = ext.intersection(floor_boundary)
+                        except Exception:
+                            clipped = ext
+                        candidates = _extract_linestrings(clipped)
+                        if candidates:
+                            ext = max(candidates, key=lambda s: s.length)
                         walls.append(WallSegment(
                             type="partition_wall",
-                            geometry=line,
+                            geometry=ext,
                             thickness=wall_thickness,
                             room_ids=[id_a, id_b],
                         ))
@@ -415,6 +477,16 @@ def generate_doors(
     def _is_room(zt: str) -> bool:
         return zt not in ("corridor", "core", "elevator", "staircase")
 
+    def get_type(zid: str) -> str:
+        zt_lower = zid.lower()
+        if "corridor" in zt_lower:
+            return "corridor"
+        if "core" in zt_lower:
+            return "core"
+        if zone_types is not None:
+            return zone_types.get(zid, "room")
+        return "room"
+
     margin = 0.2
 
     def _door_point(wall: WallSegment) -> Optional[Tuple[float, float]]:
@@ -443,8 +515,8 @@ def generate_doors(
 
         if zone_types is not None:
             a, b = wall.room_ids[0], wall.room_ids[1]
-            type_a = zone_types.get(a, "room")
-            type_b = zone_types.get(b, "room")
+            type_a = get_type(a)
+            type_b = get_type(b)
             legal = (
                 (_is_room(type_a) and type_b == "corridor") or
                 (_is_room(type_b) and type_a == "corridor") or
@@ -500,7 +572,7 @@ def generate_doors(
         for w in room_candidates:
             a, b = w.room_ids[0], w.room_ids[1]
             other = b if a == rid else a
-            if zone_types.get(other, "room") == "corridor":
+            if get_type(other) == "corridor":
                 corridor_candidates.append(w)
             else:
                 other_candidates.append(w)
@@ -531,8 +603,8 @@ def generate_doors(
     core_candidates = []
     for w in candidates:
         a, b = w.room_ids[0], w.room_ids[1]
-        type_a = zone_types.get(a, "room")
-        type_b = zone_types.get(b, "room")
+        type_a = get_type(a)
+        type_b = get_type(b)
         if (type_a == "corridor" and type_b == "core") or (type_b == "corridor" and type_a == "core"):
             core_candidates.append(w)
     if core_candidates:
@@ -662,6 +734,85 @@ def generate_windows_from_exterior_walls(
     return windows
 
 
+def generate_windows_from_floor_boundary(
+    room_rects: Dict[str, Tuple[float, float, float, float]],
+    zone_types: Dict[str, str],
+    rooms_needing_window: Set[str],
+    floor_bounds: Tuple[float, float, float, float],
+    exterior_thickness: float = 0.24,
+    window_width: float = 1.2,
+    window_spacing: float = 2.0,
+) -> List[WindowPlacement]:
+    fminx, fminy, fmaxx, fmaxy = floor_bounds
+    proximity = max(0.05, float(exterior_thickness))
+
+    windows: List[WindowPlacement] = []
+    for rid in rooms_needing_window:
+        if zone_types.get(rid) != "room":
+            continue
+        rect = room_rects.get(rid)
+        if rect is None:
+            continue
+        rx, ry, rw, rh = rect
+        if rw <= 0 or rh <= 0:
+            continue
+
+        left_gap = rx - fminx
+        right_gap = fmaxx - (rx + rw)
+        bottom_gap = ry - fminy
+        top_gap = fmaxy - (ry + rh)
+
+        gaps = {
+            "left": left_gap,
+            "right": right_gap,
+            "bottom": bottom_gap,
+            "top": top_gap,
+        }
+        side = min(gaps.keys(), key=lambda k: gaps[k])
+        if gaps[side] > proximity:
+            continue
+
+        t = float(exterior_thickness)
+        if side in ("left", "right"):
+            x = (fminx + t / 2) if side == "left" else (fmaxx - t / 2)
+            y0 = max(fminy, ry)
+            y1 = min(fmaxy, ry + rh)
+            wall_len = y1 - y0
+            if wall_len < window_width:
+                continue
+            num = max(1, int(wall_len / window_spacing))
+            for k in range(num):
+                t = (k + 0.5) / num
+                wy = y0 + t * (y1 - y0)
+                windows.append(WindowPlacement(
+                    position=(round(float(x), 2), round(float(wy), 2)),
+                    width=window_width,
+                    room_id=rid,
+                    wall_length=round(float(wall_len), 2),
+                    rotation=90.0,
+                ))
+        else:
+            y = (fminy + t / 2) if side == "bottom" else (fmaxy - t / 2)
+            x0 = max(fminx, rx)
+            x1 = min(fmaxx, rx + rw)
+            wall_len = x1 - x0
+            if wall_len < window_width:
+                continue
+            num = max(1, int(wall_len / window_spacing))
+            for k in range(num):
+                t = (k + 0.5) / num
+                wx = x0 + t * (x1 - x0)
+                windows.append(WindowPlacement(
+                    position=(round(float(wx), 2), round(float(y), 2)),
+                    width=window_width,
+                    room_id=rid,
+                    wall_length=round(float(wall_len), 2),
+                    rotation=0.0,
+                ))
+
+    return windows
+
+
 # ============================================================
 # 一站式后处理
 # ============================================================
@@ -689,7 +840,27 @@ def postprocess_floor(
         floor_boundary=floor_boundary,
     )
     doors = generate_doors(walls)
-    windows = generate_windows(walls, rooms)  # 窗户只放在真实房间上
+    room_rects: Dict[str, Tuple[float, float, float, float]] = {}
+    zone_types: Dict[str, str] = {}
+    rooms_needing_window: Set[str] = set()
+    for r in rooms:
+        rid = getattr(r, "id", getattr(r, "room_id", "?"))
+        if not hasattr(r, "polygon") or r.polygon.is_empty:
+            continue
+        minx, miny, maxx, maxy = r.polygon.bounds
+        room_rects[rid] = (float(minx), float(miny), float(maxx - minx), float(maxy - miny))
+        zone_types[rid] = "room"
+        has_window = getattr(r, "has_window", False) or getattr(r, "needs_window", False)
+        if has_window:
+            rooms_needing_window.add(rid)
+    exterior_thickness = next((w.thickness for w in walls if w.type == "exterior_wall"), 0.24)
+    windows = generate_windows_from_floor_boundary(
+        room_rects=room_rects,
+        zone_types=zone_types,
+        rooms_needing_window=rooms_needing_window,
+        floor_bounds=floor_boundary.bounds,
+        exterior_thickness=float(exterior_thickness),
+    )
 
     return PostprocessResult(walls=walls, doors=doors, windows=windows)
 
@@ -707,17 +878,23 @@ def wall_to_dict(wall: WallSegment) -> dict:
         for line in wall.geometry.geoms:
             coords.extend([[round(x, 2), round(y, 2)] for x, y in line.coords])
 
-    # 墙体 polygon：LineString buffer(thickness/2) → 精确矩形
     wall_polygon = []
     try:
-        buffered = wall.geometry.buffer(
-            wall.thickness / 2, cap_style="flat", join_style="mitre"
-        )
         poly: Optional[Polygon] = None
-        if isinstance(buffered, Polygon) and not buffered.is_empty:
-            poly = buffered
-        elif isinstance(buffered, MultiPolygon) and not buffered.is_empty:
-            poly = max(buffered.geoms, key=lambda p: p.area, default=None)
+        if isinstance(wall.geometry, Polygon) and not wall.geometry.is_empty:
+            poly = wall.geometry
+        elif isinstance(wall.geometry, MultiPolygon) and not wall.geometry.is_empty:
+            poly = max(wall.geometry.geoms, key=lambda p: p.area, default=None)
+        else:
+            buffered = wall.geometry.buffer(
+                wall.thickness / 2,
+                cap_style=CAP_STYLE.flat,
+                join_style=JOIN_STYLE.mitre,
+            )
+            if isinstance(buffered, Polygon) and not buffered.is_empty:
+                poly = buffered
+            elif isinstance(buffered, MultiPolygon) and not buffered.is_empty:
+                poly = max(buffered.geoms, key=lambda p: p.area, default=None)
         if poly is not None and not poly.is_empty:
             wall_polygon = [[round(x, 2), round(y, 2)] for x, y in poly.exterior.coords]
     except Exception:

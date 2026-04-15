@@ -19,6 +19,7 @@ from .postprocessor import (
     generate_wall_mesh,
     generate_windows,
     generate_windows_from_exterior_walls,
+    generate_windows_from_floor_boundary,
     postprocess_floor,
     wall_to_dict,
     window_to_dict,
@@ -202,8 +203,14 @@ def building_result_to_dict(
                 rooms_needing_window.add(room_id)
 
         pp_doors = generate_doors(pp_walls, zone_types=zone_types, zone_rects=room_rects)
-        exterior_walls = [w for w in pp_walls if w.type == "exterior_wall"]
-        pp_windows = generate_windows_from_exterior_walls(exterior_walls, rooms_needing_window)
+        exterior_thickness = next((w.thickness for w in pp_walls if w.type == "exterior_wall"), 0.24)
+        pp_windows = generate_windows_from_floor_boundary(
+            room_rects=room_rects,
+            zone_types=zone_types,
+            rooms_needing_window=rooms_needing_window,
+            floor_bounds=floor_boundary.bounds,
+            exterior_thickness=float(exterior_thickness),
+        )
 
         floors[floor_id] = {
             "floor_name": floor_id,

@@ -1,4 +1,5 @@
-from shapely.geometry import LineString, box
+from shapely.geometry import JOIN_STYLE, LineString, Polygon, box
+from shapely.ops import unary_union
 
 
 def test_core_tube_north_stays_inside_floor():
@@ -45,11 +46,13 @@ def test_generate_walls_from_topology_outputs_unique_two_point_lines():
     }
     walls = generate_walls_from_topology(rects, edge_set, floor_bounds=(0.0, 0.0, 12.0, 5.0))
 
-    assert all(isinstance(w.geometry, LineString) for w in walls)
-    assert all(len(list(w.geometry.coords)) == 2 for w in walls)
+    partition_walls = [w for w in walls if w.type == "partition_wall"]
+    assert partition_walls
+    assert all(isinstance(w.geometry, LineString) for w in partition_walls)
+    assert all(len(list(w.geometry.coords)) == 2 for w in partition_walls)
 
     keys = set()
-    for w in walls:
+    for w in partition_walls:
         (x0, y0), (x1, y1) = list(w.geometry.coords)
         a = (round(x0, 2), round(y0, 2))
         b = (round(x1, 2), round(y1, 2))
@@ -93,3 +96,106 @@ def test_check_connectivity_topological_reaches_rooms_via_corridor():
     }
     unreachable = check_connectivity_topological(edge_set, ["corridor_0", "room_a", "room_b"])
     assert unreachable == []
+
+
+def test_exterior_walls_do_not_depend_on_rooms_touching_bounds():
+    from backend.core.geometry.postprocessor import generate_walls_from_topology
+
+    rects = {
+        "room_a": (2.0, 2.0, 3.0, 3.0),
+    }
+    walls = generate_walls_from_topology(rects, edge_set={}, floor_bounds=(0.0, 0.0, 10.0, 8.0))
+    exterior = [w for w in walls if w.type == "exterior_wall"]
+    assert len(exterior) == 4
+    assert all(isinstance(w.geometry, Polygon) for w in exterior)
+
+
+def test_exterior_wall_pieces_are_mutually_exclusive_and_cover_ring():
+    from backend.core.geometry.postprocessor import generate_walls_from_topology
+
+    floor_bounds = (0.0, 0.0, 10.0, 8.0)
+    rects = {"room_a": (2.0, 2.0, 3.0, 3.0)}
+    walls = generate_walls_from_topology(rects, edge_set={}, floor_bounds=floor_bounds)
+    exterior_polys = [w.geometry for w in walls if w.type == "exterior_wall"]
+    assert len(exterior_polys) == 4
+
+    for i in range(len(exterior_polys)):
+        for j in range(i + 1, len(exterior_polys)):
+            assert exterior_polys[i].intersection(exterior_polys[j]).area <= 1e-6
+
+    outer = box(*floor_bounds)
+    t = 0.24
+    inner = outer.buffer(-t, join_style=JOIN_STYLE.mitre)
+    ring = (outer if inner.is_empty else outer.difference(inner)).buffer(0)
+    union = unary_union(exterior_polys).buffer(0)
+    assert abs(union.area - ring.area) <= 1e-3
+
+
+def test_corner_gap_fixed_by_partition_extension_overlaps_exterior_wall():
+    from backend.core.geometry.postprocessor import generate_walls_from_topology, wall_to_dict
+
+    floor_bounds = (0.0, 0.0, 10.0, 10.0)
+    rects = {
+        "room_a": (0.0, 0.24, 5.0, 5.0),
+        "corridor_0": (5.0, 0.24, 5.0, 5.0),
+    }
+    edge_set = {frozenset({"room_a", "corridor_0"}): "vertical"}
+    walls = generate_walls_from_topology(rects, edge_set=edge_set, floor_bounds=floor_bounds)
+
+    exterior_union = unary_union([w.geometry for w in walls if w.type == "exterior_wall"]).buffer(0)
+    part = next(w for w in walls if w.type == "partition_wall")
+    part_poly_coords = wall_to_dict(part)["polygon"]
+    part_poly = Polygon(part_poly_coords)
+    assert part_poly.intersection(exterior_union).area > 1e-6
+
+
+def test_partition_walls_do_not_extend_outside_floor_bounds():
+    from backend.core.geometry.postprocessor import generate_walls_from_topology
+
+    floor_bounds = (0.0, 0.0, 11.29, 7.53)
+    rects = {
+        "room_001": (0.0, 0.0, 8.4, 2.5),
+        "corridor_h": (0.0, 2.5, 11.29, 2.0),
+    }
+    edge_set = {frozenset({"room_001", "corridor_h"}): "horizontal"}
+    walls = generate_walls_from_topology(rects, edge_set=edge_set, floor_bounds=floor_bounds)
+    floor = box(*floor_bounds)
+    for w in walls:
+        if w.type != "partition_wall":
+            continue
+        (x0, y0), (x1, y1) = list(w.geometry.coords)
+        assert x0 >= 0.0 and x1 >= 0.0 and y0 >= 0.0 and y1 >= 0.0
+        assert x0 <= floor_bounds[2] and x1 <= floor_bounds[2]
+        assert y0 <= floor_bounds[3] and y1 <= floor_bounds[3]
+
+
+def test_extend_line_slanted_and_zero_length():
+    from backend.core.geometry.postprocessor import _extend_line
+
+    a = LineString([(0.0, 0.0), (1.0, 1.0)])
+    b = _extend_line(a, 0.5)
+    assert abs(b.length - (a.length + 1.0)) <= 1e-6
+
+    z = LineString([(1.0, 1.0), (1.0, 1.0)])
+    z2 = _extend_line(z, 0.5)
+    assert z2.length == 0.0
+
+
+def test_windows_generated_from_floor_bounds_have_correct_rotation():
+    from backend.core.geometry.postprocessor import generate_windows_from_floor_boundary
+
+    floor_bounds = (0.0, 0.0, 10.0, 8.0)
+    room_rects = {"room_a": (0.01, 2.0, 3.0, 3.0)}
+    zone_types = {"room_a": "room"}
+    rooms_needing_window = {"room_a"}
+
+    windows = generate_windows_from_floor_boundary(
+        room_rects=room_rects,
+        zone_types=zone_types,
+        rooms_needing_window=rooms_needing_window,
+        floor_bounds=floor_bounds,
+        exterior_thickness=0.24,
+    )
+    assert windows
+    assert all(w.rotation == 90.0 for w in windows)
+    assert all(abs(w.position[0] - 0.12) <= 1e-6 for w in windows)
