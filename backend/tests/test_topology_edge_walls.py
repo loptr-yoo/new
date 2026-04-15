@@ -169,6 +169,18 @@ def test_partition_walls_do_not_extend_outside_floor_bounds():
         assert y0 <= floor_bounds[3] and y1 <= floor_bounds[3]
 
 
+def test_edge_set_allows_small_gaps_between_spaces():
+    from backend.core.geometry.layout_generator import _build_edge_set_from_rects
+
+    rects = {
+        "room_001": (0.0, 0.0, 6.4, 2.7),
+        "corridor_h": (0.0, 2.75, 10.61, 1.5),
+    }
+    edge_set = _build_edge_set_from_rects(rects, tol=0.06)
+    key = frozenset({"room_001", "corridor_h"})
+    assert edge_set.get(key) == "horizontal"
+
+
 def test_extend_line_slanted_and_zero_length():
     from backend.core.geometry.postprocessor import _extend_line
 

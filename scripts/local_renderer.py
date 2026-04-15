@@ -168,16 +168,85 @@ def _draw_rect(ax: Any, elem: Dict[str, Any], facecolor: str) -> None:
 
 
 def _draw_door(ax: Any, elem: Dict[str, Any]) -> None:
-    """
-    门洞绘制 Hook：
-    - 当前只画 Bounding Box（黄色块）
-    - 预留 swing_angle / swing_dir 字段，以便未来画扇形轨迹（CAD 风格）
-    """
-    _draw_rect(ax, elem, facecolor=COLOR_MAP.get("door", "#fbbf24"))
+    try:
+        x_raw = elem.get("x")
+        y_raw = elem.get("y")
+        w_raw = elem.get("width")
+        h_raw = elem.get("height")
+        if x_raw is None or y_raw is None or w_raw is None or h_raw is None:
+            raise ValueError("missing required rect fields")
+        x = float(x_raw)
+        y = float(y_raw)
+        w = float(w_raw)
+        h = float(h_raw)
+    except Exception:
+        _warn(f"Skip door element (missing x/y/width/height): id={elem.get('id')}")
+        return
+
+    rotation = float(elem.get("rotation") or 0.0)
+    z = _zorder(elem)
+
+    anchor = _rect_anchor_mode(elem)
+    if anchor == "center":
+        cx, cy = x, y
+        blx = cx - w / 2
+        bly = cy - h / 2
+    else:
+        blx, bly = x, y
+        cx, cy = blx + w / 2, bly + h / 2
+
+    t = transforms.Affine2D().rotate_deg_around(cx, cy, rotation) + ax.transData
+
+    eraser = patches.Rectangle((blx, bly), w, h, facecolor="#ffffff", edgecolor="none", alpha=1.0, zorder=z)
+    eraser.set_transform(t)
+    ax.add_patch(eraser)
+
+    outline = patches.Rectangle((blx, bly), w, h, facecolor="none", edgecolor="#334155", linewidth=1.2, alpha=1.0, zorder=z + 1)
+    outline.set_transform(t)
+    ax.add_patch(outline)
 
 
 def _draw_window(ax: Any, elem: Dict[str, Any]) -> None:
-    _draw_rect(ax, elem, facecolor=COLOR_MAP.get("window", "#38bdf8"))
+    try:
+        x_raw = elem.get("x")
+        y_raw = elem.get("y")
+        w_raw = elem.get("width")
+        h_raw = elem.get("height")
+        if x_raw is None or y_raw is None or w_raw is None or h_raw is None:
+            raise ValueError("missing required rect fields")
+        x = float(x_raw)
+        y = float(y_raw)
+        w = float(w_raw)
+        h = float(h_raw)
+    except Exception:
+        _warn(f"Skip window element (missing x/y/width/height): id={elem.get('id')}")
+        return
+
+    rotation = float(elem.get("rotation") or 0.0)
+    z = _zorder(elem)
+
+    anchor = _rect_anchor_mode(elem)
+    if anchor == "center":
+        cx, cy = x, y
+        blx = cx - w / 2
+        bly = cy - h / 2
+    else:
+        blx, bly = x, y
+        cx, cy = blx + w / 2, bly + h / 2
+
+    t = transforms.Affine2D().rotate_deg_around(cx, cy, rotation) + ax.transData
+
+    eraser = patches.Rectangle((blx, bly), w, h, facecolor="#ffffff", edgecolor="none", alpha=1.0, zorder=z)
+    eraser.set_transform(t)
+    ax.add_patch(eraser)
+
+    if w >= h:
+        x0, y0 = blx, cy
+        x1, y1 = blx + w, cy
+    else:
+        x0, y0 = cx, bly
+        x1, y1 = cx, bly + h
+    ax.plot([x0, x1], [y0, y1], color="#334155", linewidth=1.6, zorder=z + 1, transform=t)
 
 
 CUSTOM_DRAW_HOOKS: Dict[str, Callable[[Any, Dict[str, Any]], None]] = {
@@ -205,7 +274,10 @@ def _render(layout: Dict[str, Any], out_path: Path) -> None:
 
     fig_w = max(6.0, width / 2.0)
     fig_h = max(4.0, height / 2.0)
+    
     fig, ax = plt.subplots(figsize=(fig_w, fig_h))
+    fig.set_facecolor("#ffffff")
+    ax.set_facecolor("#ffffff")
 
     # 给四周留出 0.5 米的物理边距，防止外墙及可能悬挑的元素被切除
     padding = 0.5

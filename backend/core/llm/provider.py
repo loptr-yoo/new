@@ -7,6 +7,7 @@ import httpx
 import asyncio
 import logging
 import os
+import random
 
 
 # Default bases
@@ -54,7 +55,9 @@ class LLMClient:
 
 async def safe_fetch(url: str, payload: Any, headers: Dict[str, str], provider_tag: str) -> Any:
     logger = logging.getLogger(f"llm.{provider_tag}")
-    backoff = [0, 1.5, 3.0]
+    max_attempts = 5
+    base_backoff_s = 1.0
+    backoff_cap_s = 20.0
     last_exc: Optional[Exception] = None
     
     safe_headers = dict(headers)
@@ -81,7 +84,7 @@ async def safe_fetch(url: str, payload: Any, headers: Dict[str, str], provider_t
         proxy_url = LOCAL_PROXY
     # ==========================================================
 
-    for i, delay in enumerate(backoff):
+    for attempt in range(max_attempts):
         try:
             # 将策略传入 AsyncClient
             async with httpx.AsyncClient(
@@ -96,9 +99,9 @@ async def safe_fetch(url: str, payload: Any, headers: Dict[str, str], provider_t
                     if res.status_code == 429:
                         retry_after = res.headers.get("Retry-After")
                         if retry_after and retry_after.isdigit():
-                            wait_time = int(retry_after)
+                            wait_time = min(int(retry_after), int(backoff_cap_s))
                             logger.warning(f"[{provider_tag}] 429 Rate Limit. Waiting {wait_time}s...")
-                            await asyncio.sleep(wait_time)
+                            await asyncio.sleep(wait_time + random.uniform(0.0, 0.3))
                             continue
                         else:
                             raise NetworkAPIError(f"[{provider_tag}] Rate Limit Exceeded (429): {res.text}")
@@ -113,14 +116,16 @@ async def safe_fetch(url: str, payload: Any, headers: Dict[str, str], provider_t
             if "Client Error" in str(e):
                 raise  # fast fail for 4xx errors except 429
             last_exc = e
-            logger.warning(f"[{provider_tag}] request failed on attempt {i+1}: {e}")
-            if i < len(backoff) - 1:
-                await asyncio.sleep(delay)
+            logger.warning(f"[{provider_tag}] request failed on attempt {attempt+1}/{max_attempts}: {e}")
+            if attempt < max_attempts - 1:
+                delay = min(backoff_cap_s, base_backoff_s * (2 ** attempt))
+                await asyncio.sleep(random.uniform(0.0, delay))
         except Exception as e:
             last_exc = e
-            logger.warning(f"[{provider_tag}] network exception on attempt {i+1}: {e}")
-            if i < len(backoff) - 1:
-                await asyncio.sleep(delay)
+            logger.warning(f"[{provider_tag}] network exception on attempt {attempt+1}/{max_attempts}: {e}")
+            if attempt < max_attempts - 1:
+                delay = min(backoff_cap_s, base_backoff_s * (2 ** attempt))
+                await asyncio.sleep(random.uniform(0.0, delay))
                 
     raise NetworkAPIError(f"[{provider_tag}] Max retries exceeded. Last error: {str(last_exc)}") from last_exc
 

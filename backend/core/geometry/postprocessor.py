@@ -185,7 +185,12 @@ def generate_walls_from_topology(
         bx, by, bw, bh = room_rects[id_b]
 
         if orientation == "vertical":
-            shared_x = ax + aw if abs(ax + aw - bx) < 0.01 else bx + bw
+            dist1 = abs((ax + aw) - bx)
+            dist2 = abs(ax - (bx + bw))
+            if dist1 < dist2:
+                shared_x = ((ax + aw) + bx) / 2.0
+            else:
+                shared_x = (ax + (bx + bw)) / 2.0
             y0 = max(ay, by)
             y1 = min(ay + ah, by + bh)
             if (y1 - y0) > min_wall_length:
@@ -198,7 +203,12 @@ def generate_walls_from_topology(
                     room_ids=[id_a, id_b],
                 ))
         else:
-            shared_y = ay + ah if abs(ay + ah - by) < 0.01 else by + bh
+            dist1 = abs((ay + ah) - by)
+            dist2 = abs(ay - (by + bh))
+            if dist1 < dist2:
+                shared_y = ((ay + ah) + by) / 2.0
+            else:
+                shared_y = (ay + (by + bh)) / 2.0
             x0 = max(ax, bx)
             x1 = min(ax + aw, bx + bw)
             if (x1 - x0) > min_wall_length:

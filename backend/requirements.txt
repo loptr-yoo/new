@@ -6,3 +6,4 @@ python-dotenv>=1.0
 json-repair>=0.30.0
 shapely>=2.0
 cma>=3.3.0
+ortools>=9.0

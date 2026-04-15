@@ -587,7 +587,7 @@ def check_connectivity(
 
 def _build_edge_set_from_rects(
     rects: Dict[str, Tuple[float, float, float, float]],
-    tol: float = 0.01,
+    tol: float = 0.06,
     min_shared_length: float = 0.3,
 ) -> Dict[FrozenSet[str], str]:
     edge_set: Dict[FrozenSet[str], str] = {}
@@ -904,7 +904,7 @@ def generate_layout_v2(
             rects[r.id] = (float(minx), float(miny), float(maxx - minx), float(maxy - miny))
             room_ids.append(r.id)
 
-    edge_set = _build_edge_set_from_rects(rects)
+    edge_set = _build_edge_set_from_rects(rects, tol=0.06)
     unreachable_zones = check_connectivity_topological(edge_set, list(rects.keys()))
     unreachable_rooms = [z for z in unreachable_zones if z in room_ids]
     if unreachable_rooms:

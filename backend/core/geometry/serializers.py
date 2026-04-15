@@ -180,6 +180,27 @@ def building_result_to_dict(
             room_rects[r.id] = (float(minx), float(miny), float(maxx - minx), float(maxy - miny))
             zone_types[r.id] = "room"
 
+        floor_warnings = list(getattr(layout, "warnings", []) or [])
+        try:
+            floor_area = float(floor_boundary.area)
+            space_area = 0.0
+            if layout.core_tube is not None and hasattr(layout.core_tube, "polygon") and not layout.core_tube.polygon.is_empty:
+                space_area += float(layout.core_tube.polygon.area)
+            if hasattr(layout, "corridors") and layout.corridors:
+                for c in layout.corridors:
+                    if hasattr(c, "polygon") and c.polygon is not None and not c.polygon.is_empty:
+                        space_area += float(c.polygon.area)
+            for r in layout.room_layouts:
+                if hasattr(r, "polygon") and not r.polygon.is_empty:
+                    space_area += float(r.polygon.area)
+            gap_area = floor_area - space_area
+            if gap_area > 0.05:
+                floor_warnings.append(f"Coverage gap area={gap_area:.3f}m^2 (floor - sum(spaces))")
+            elif gap_area < -0.05:
+                floor_warnings.append(f"Coverage overlap area={(-gap_area):.3f}m^2 (sum(spaces) - floor)")
+        except Exception:
+            pass
+
         edge_set = getattr(layout, "edge_set", None)
         if edge_set and room_rects:
             pp_walls = generate_walls_from_topology(
@@ -221,7 +242,7 @@ def building_result_to_dict(
             "doors": [door_to_dict(d) for d in pp_doors],
             "windows": [window_to_dict(w) for w in pp_windows],
             "generation_time_ms": round(layout.generation_time_ms, 1),
-            "warnings": layout.warnings,
+            "warnings": floor_warnings,
         }
 
     # 降级摘要
