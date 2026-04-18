@@ -44,7 +44,8 @@ def test_generate_walls_from_topology_outputs_unique_two_point_lines():
         frozenset({"room_a", "corridor_0"}): "vertical",
         frozenset({"corridor_0", "room_b"}): "vertical",
     }
-    walls = generate_walls_from_topology(rects, edge_set, floor_bounds=(0.0, 0.0, 12.0, 5.0))
+    zone_types = {k: "room" for k in rects.keys()}
+    walls = generate_walls_from_topology(rects, edge_set, floor_bounds=(0.0, 0.0, 12.0, 5.0), zone_types=zone_types)
 
     partition_walls = [w for w in walls if w.type == "partition_wall"]
     assert partition_walls
@@ -87,6 +88,92 @@ def test_generate_doors_whitelist_blocks_core_non_door_face():
     assert doors[0].rotation == 0.0
 
 
+def test_generate_doors_allows_core_staircase_and_elevator_hall_and_blocks_shaft():
+    from backend.core.geometry.postprocessor import DoorPlacement, WallSegment, generate_doors
+
+    zone_types = {
+        "corridor_0": "corridor",
+        "core_staircase": "staircase",
+        "core_elevator_hall": "elevator_hall",
+        "core_elevator_shaft": "elevator_shaft",
+    }
+
+    walls = [
+        WallSegment(
+            type="partition_wall",
+            geometry=LineString([(0.0, 0.0), (2.0, 0.0)]),
+            thickness=0.12,
+            room_ids=["corridor_0", "core_staircase"],
+        ),
+        WallSegment(
+            type="partition_wall",
+            geometry=LineString([(2.0, 0.0), (4.0, 0.0)]),
+            thickness=0.12,
+            room_ids=["corridor_0", "core_elevator_hall"],
+        ),
+        WallSegment(
+            type="partition_wall",
+            geometry=LineString([(2.0, 0.0), (2.0, 2.0)]),
+            thickness=0.12,
+            room_ids=["core_staircase", "core_elevator_hall"],
+        ),
+        WallSegment(
+            type="partition_wall",
+            geometry=LineString([(2.0, 2.0), (4.0, 2.0)]),
+            thickness=0.12,
+            room_ids=["core_elevator_hall", "core_elevator_shaft"],
+        ),
+    ]
+
+    doors = generate_doors(walls, zone_types=zone_types, zone_rects={})
+    assert all(isinstance(d, DoorPlacement) for d in doors)
+
+    connects = [frozenset(d.connects) for d in doors]
+    assert frozenset({"corridor_0", "core_elevator_hall"}) in connects
+    assert frozenset({"core_staircase", "core_elevator_hall"}) in connects
+    assert all("core_elevator_shaft" not in d.connects for d in doors)
+    assert frozenset({"corridor_0", "core_staircase"}) not in connects
+
+
+def test_generate_walls_from_topology_blocks_elevator_hall_to_shaft_wall():
+    from backend.core.geometry.postprocessor import generate_walls_from_topology
+
+    rects = {
+        "core_elevator_hall": (5.0, 4.0, 2.0, 1.0),
+        "core_elevator_shaft": (5.0, 5.0, 2.0, 1.0),
+    }
+    zone_types = {"core_elevator_hall": "elevator_hall", "core_elevator_shaft": "elevator_shaft"}
+    edge_set = {frozenset({"core_elevator_hall", "core_elevator_shaft"}): "horizontal"}
+    walls = generate_walls_from_topology(rects, edge_set=edge_set, floor_bounds=(0.0, 0.0, 10.0, 8.0), zone_types=zone_types)
+    blocked = [
+        w for w in walls
+        if w.type == "partition_wall" and set(w.room_ids) == {"core_elevator_hall", "core_elevator_shaft"}
+    ]
+    assert blocked == []
+
+
+def test_generate_walls_from_topology_adds_core_north_shell_wall_when_void_gap_exists():
+    from backend.core.geometry.postprocessor import generate_walls_from_topology
+
+    floor_bounds = (0.0, 0.0, 10.0, 10.0)
+    rects = {
+        "core_staircase": (2.0, 8.0, 2.0, 1.0),
+    }
+    zone_types = {"core_staircase": "staircase"}
+    walls = generate_walls_from_topology(rects, edge_set={}, floor_bounds=floor_bounds, zone_types=zone_types)
+    top_y = 9.0
+    shell = []
+    for w in walls:
+        if w.type != "partition_wall":
+            continue
+        if w.room_ids != ["core_staircase"]:
+            continue
+        (x0, y0), (x1, y1) = list(w.geometry.coords)
+        if abs(y0 - top_y) < 0.02 and abs(y1 - top_y) < 0.02 and (max(x0, x1) - min(x0, x1)) > 1.5:
+            shell.append(w)
+    assert shell
+
+
 def test_check_connectivity_topological_reaches_rooms_via_corridor():
     from backend.core.geometry.layout_generator import check_connectivity_topological
 
@@ -104,7 +191,7 @@ def test_exterior_walls_do_not_depend_on_rooms_touching_bounds():
     rects = {
         "room_a": (2.0, 2.0, 3.0, 3.0),
     }
-    walls = generate_walls_from_topology(rects, edge_set={}, floor_bounds=(0.0, 0.0, 10.0, 8.0))
+    walls = generate_walls_from_topology(rects, edge_set={}, floor_bounds=(0.0, 0.0, 10.0, 8.0), zone_types={"room_a": "room"})
     exterior = [w for w in walls if w.type == "exterior_wall"]
     assert len(exterior) == 4
     assert all(isinstance(w.geometry, Polygon) for w in exterior)
@@ -115,7 +202,8 @@ def test_exterior_wall_pieces_are_mutually_exclusive_and_cover_ring():
 
     floor_bounds = (0.0, 0.0, 10.0, 8.0)
     rects = {"room_a": (2.0, 2.0, 3.0, 3.0)}
-    walls = generate_walls_from_topology(rects, edge_set={}, floor_bounds=floor_bounds)
+    zone_types = {k: "room" for k in rects.keys()}
+    walls = generate_walls_from_topology(rects, edge_set={}, floor_bounds=floor_bounds, zone_types=zone_types)
     exterior_polys = [w.geometry for w in walls if w.type == "exterior_wall"]
     assert len(exterior_polys) == 4
 
@@ -140,7 +228,8 @@ def test_corner_gap_fixed_by_partition_extension_overlaps_exterior_wall():
         "corridor_0": (5.0, 0.24, 5.0, 5.0),
     }
     edge_set = {frozenset({"room_a", "corridor_0"}): "vertical"}
-    walls = generate_walls_from_topology(rects, edge_set=edge_set, floor_bounds=floor_bounds)
+    zone_types = {k: "room" for k in rects.keys()}
+    walls = generate_walls_from_topology(rects, zone_types={}, edge_set=edge_set, floor_bounds=floor_bounds)
 
     exterior_union = unary_union([w.geometry for w in walls if w.type == "exterior_wall"]).buffer(0)
     part = next(w for w in walls if w.type == "partition_wall")
@@ -158,7 +247,7 @@ def test_partition_walls_do_not_extend_outside_floor_bounds():
         "corridor_h": (0.0, 2.5, 11.29, 2.0),
     }
     edge_set = {frozenset({"room_001", "corridor_h"}): "horizontal"}
-    walls = generate_walls_from_topology(rects, edge_set=edge_set, floor_bounds=floor_bounds)
+    walls = generate_walls_from_topology(rects, edge_set=edge_set, floor_bounds=floor_bounds,zone_types={})
     floor = box(*floor_bounds)
     for w in walls:
         if w.type != "partition_wall":

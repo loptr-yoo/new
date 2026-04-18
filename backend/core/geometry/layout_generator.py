@@ -890,9 +890,22 @@ def generate_layout_v2(
 
     # ========== Phase 6: 连通性检查（拓扑 BFS，零浮点缓冲） ==========
     rects: Dict[str, Tuple[float, float, float, float]] = {}
-    if core_tube is not None and not core_tube.polygon.is_empty:
-        minx, miny, maxx, maxy = core_tube.polygon.bounds
-        rects["core_tube"] = (float(minx), float(miny), float(maxx - minx), float(maxy - miny))
+    if core_tube is not None and hasattr(core_tube, "polygon") and not core_tube.polygon.is_empty:
+        subzones = [
+            ("core_staircase", getattr(core_tube, "staircase", None)),
+            ("core_elevator_hall", getattr(core_tube, "elevator_hall", None)),
+            ("core_elevator_shaft", getattr(core_tube, "elevator_shaft", None)),
+        ]
+        has_subzones = all(z is not None and hasattr(z, "is_empty") and not z.is_empty for _, z in subzones)
+        if has_subzones:
+            for zid, zpoly in subzones:
+                if zpoly is None or zpoly.is_empty:
+                    continue
+                minx, miny, maxx, maxy = zpoly.bounds
+                rects[zid] = (float(minx), float(miny), float(maxx - minx), float(maxy - miny))
+        else:
+            minx, miny, maxx, maxy = core_tube.polygon.bounds
+            rects["core_tube"] = (float(minx), float(miny), float(maxx - minx), float(maxy - miny))
     for c in corridors:
         if hasattr(c, "polygon") and c.polygon is not None and not c.polygon.is_empty:
             minx, miny, maxx, maxy = c.polygon.bounds

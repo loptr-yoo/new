@@ -13,6 +13,7 @@ from shapely.geometry import (
     Polygon,
     box,
 )
+from shapely.geometry.base import BaseGeometry
 from shapely.ops import unary_union
 
 from .room_spec import ZoneType
@@ -58,10 +59,50 @@ class CoreTube:
     width: float
     depth: float
     # 子区域
-    elevator: Optional[Polygon] = None
+    elevator: Optional[BaseGeometry] = None
     staircase: Optional[Polygon] = None
+    elevator_hall: Optional[Polygon] = None
+    elevator_shaft: Optional[Polygon] = None
     elevator_area: float = 0.0
     staircase_area: float = 0.0
+    elevator_hall_area: float = 0.0
+    elevator_shaft_area: float = 0.0
+
+    def build_subzones_from_bounds(self) -> None:
+        minx, miny, maxx, maxy = self.polygon.bounds
+        w = maxx - minx
+        h = maxy - miny
+        if w <= 0 or h <= 0:
+            self.staircase = None
+            self.elevator_hall = None
+            self.elevator_shaft = None
+            self.elevator = None
+            self.staircase_area = 0.0
+            self.elevator_hall_area = 0.0
+            self.elevator_shaft_area = 0.0
+            self.elevator_area = 0.0
+            return
+
+        split_x = minx + 0.4 * w
+        split_y = miny + 0.5 * h
+
+        staircase = box(minx, miny, split_x, maxy)
+        elevator_hall = box(split_x, miny, maxx, split_y)
+        elevator_shaft = box(split_x, split_y, maxx, maxy)
+
+        self.staircase = staircase
+        self.elevator_hall = elevator_hall
+        self.elevator_shaft = elevator_shaft
+        self.staircase_area = float(staircase.area)
+        self.elevator_hall_area = float(elevator_hall.area)
+        self.elevator_shaft_area = float(elevator_shaft.area)
+        try:
+            merged: BaseGeometry = unary_union([elevator_hall, elevator_shaft])
+            self.elevator = merged
+            self.elevator_area = float(merged.area)
+        except Exception:
+            self.elevator = elevator_hall
+            self.elevator_area = float(elevator_hall.area)
 
     @classmethod
     def create(
@@ -71,31 +112,15 @@ class CoreTube:
         depth: float,
         elevator_ratio: float = 0.62,
     ) -> CoreTube:
-        """创建矩形核心筒，自动拆分 elevator + staircase"""
+        """创建矩形核心筒，自动拆分 staircase + elevator_hall + elevator_shaft"""
         cx, cy = center
         polygon = box(
             cx - width / 2, cy - depth / 2,
             cx + width / 2, cy + depth / 2,
         )
-
-        # 沿短边方向切一刀
-        if width <= depth:
-            # 短边是 width → 沿 y 方向切
-            split_y = cy - depth / 2 + depth * elevator_ratio
-            elevator = box(cx - width / 2, cy - depth / 2, cx + width / 2, split_y)
-            staircase = box(cx - width / 2, split_y, cx + width / 2, cy + depth / 2)
-        else:
-            # 短边是 depth → 沿 x 方向切
-            split_x = cx - width / 2 + width * elevator_ratio
-            elevator = box(cx - width / 2, cy - depth / 2, split_x, cy + depth / 2)
-            staircase = box(split_x, cy - depth / 2, cx + width / 2, cy + depth / 2)
-
-        return cls(
-            polygon=polygon, center=center, width=width, depth=depth,
-            elevator=elevator, staircase=staircase,
-            elevator_area=float(elevator.area),
-            staircase_area=float(staircase.area),
-        )
+        core = cls(polygon=polygon, center=center, width=width, depth=depth)
+        core.build_subzones_from_bounds()
+        return core
 
     @classmethod
     def create_for_floor(
@@ -151,15 +176,6 @@ class CoreTube:
 
         # 边界安全：确保子区域不超出楼层
         floor_poly = box(x_min, y_min, x_max, y_max)
-        if core.elevator is not None and not floor_poly.contains(core.elevator):
-            logger.warning("Elevator extends beyond floor boundary, shrinking")
-            clipped = core.elevator.intersection(floor_poly)
-            if not clipped.is_empty and isinstance(clipped, Polygon):
-                core.elevator = clipped
-                core.elevator_area = float(clipped.area)
-            else:
-                core.elevator = None
-                core.elevator_area = 0.0
         if core.staircase is not None and not floor_poly.contains(core.staircase):
             logger.warning("Staircase extends beyond floor boundary, shrinking")
             clipped = core.staircase.intersection(floor_poly)
@@ -169,6 +185,31 @@ class CoreTube:
             else:
                 core.staircase = None
                 core.staircase_area = 0.0
+        if core.elevator_hall is not None and not floor_poly.contains(core.elevator_hall):
+            logger.warning("Elevator hall extends beyond floor boundary, shrinking")
+            clipped = core.elevator_hall.intersection(floor_poly)
+            if not clipped.is_empty and isinstance(clipped, Polygon):
+                core.elevator_hall = clipped
+                core.elevator_hall_area = float(clipped.area)
+            else:
+                core.elevator_hall = None
+                core.elevator_hall_area = 0.0
+        if core.elevator_shaft is not None and not floor_poly.contains(core.elevator_shaft):
+            logger.warning("Elevator shaft extends beyond floor boundary, shrinking")
+            clipped = core.elevator_shaft.intersection(floor_poly)
+            if not clipped.is_empty and isinstance(clipped, Polygon):
+                core.elevator_shaft = clipped
+                core.elevator_shaft_area = float(clipped.area)
+            else:
+                core.elevator_shaft = None
+                core.elevator_shaft_area = 0.0
+        try:
+            if core.elevator_hall is not None and core.elevator_shaft is not None:
+                merged: BaseGeometry = unary_union([core.elevator_hall, core.elevator_shaft])
+                core.elevator = merged
+                core.elevator_area = float(merged.area)
+        except Exception:
+            pass
 
         return core
 

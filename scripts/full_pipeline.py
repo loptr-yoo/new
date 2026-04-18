@@ -23,8 +23,9 @@ from backend.core.geometry.building_orchestrator import BuildingOrchestrator
 from backend.core.geometry.serializers import building_result_to_dict
 from backend.core.geometry.topology_generator import CoreTube
 from backend.core.interior.furniture_templates import furnitures_for_room
-from backend.core.interior.models import FurnitureSpec, Obstacle, RefinedLayout, RoomBoundary
+from backend.core.interior.models import FurnitureSpec, LLMCoarseLayout, LLMCoarseLayoutItem, Obstacle, RefinedLayout, RoomBoundary
 from backend.core.interior.orchestrator import layout_room_pipeline
+from backend.core.interior.refine_solver import solve_nonoverlap_layout_greedy
 from backend.core.llm.provider import create_llm_client
 from backend.models import GenerateSemanticsRequest, SceneType
 
@@ -45,6 +46,8 @@ def _is_room_type(t: str) -> bool:
         "floor_slab",
         "corridor",
         "elevator",
+        "elevator_hall",
+        "elevator_shaft",
         "staircase",
         "partition_wall",
         "exterior_wall",
@@ -104,6 +107,8 @@ def _zorder_for(elem_type: str) -> int:
         "floor_slab": 10,
         "corridor": 20,
         "elevator": 30,
+        "elevator_hall": 30,
+        "elevator_shaft": 30,
         "staircase": 30,
         "partition_wall": 80,
         "exterior_wall": 80,
@@ -182,7 +187,12 @@ def _flatten_floor_to_elements(
 
     core = building_dict.get("core_tube") or {}
     if isinstance(core, dict):
-        for key, etype in (("elevator", "elevator"), ("staircase", "staircase")):
+        for key, etype in (
+            ("staircase", "staircase"),
+            ("elevator_hall", "elevator_hall"),
+            ("elevator_shaft", "elevator_shaft"),
+            ("elevator", "elevator"),
+        ):
             info = core.get(key)
             if not isinstance(info, dict):
                 continue
@@ -554,6 +564,34 @@ def _gravity_fallback(room: RoomBoundary, furnitures: Sequence[FurnitureSpec], o
     )
 
 
+def _has_furniture_overlap(layout: RefinedLayout, furnitures: Sequence[FurnitureSpec]) -> bool:
+    spec_by_id = {f.id: f for f in furnitures}
+    rects: List[Tuple[float, float, float, float]] = []
+
+    def _bbox(cx: float, cy: float, w: float, h: float) -> Tuple[float, float, float, float]:
+        return (cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2)
+
+    def _overlap(a: Tuple[float, float, float, float], b: Tuple[float, float, float, float]) -> bool:
+        ax0, ay0, ax1, ay1 = a
+        bx0, by0, bx1, by1 = b
+        return (min(ax1, bx1) > max(ax0, bx0)) and (min(ay1, by1) > max(ay0, by0))
+
+    for it in layout.items:
+        spec = spec_by_id.get(it.furniture_id)
+        if spec is None:
+            continue
+        w = float(spec.width)
+        h = float(spec.height)
+        if int(it.rotation) in (90, 270):
+            w, h = h, w
+        r = _bbox(float(it.cx), float(it.cy), w, h)
+        for p in rects:
+            if _overlap(r, p):
+                return True
+        rects.append(r)
+    return False
+
+
 def _furniture_elements(
     floor_id: str,
     room_id: str,
@@ -566,9 +604,11 @@ def _furniture_elements(
         spec = spec_by_id.get(it.furniture_id)
         if spec is None:
             continue
+        category_value = spec.category.value if hasattr(spec.category, 'value') else spec.category
         out.append({
             "id": f"{floor_id}_{room_id}_{it.furniture_id}",
             "type": "furniture",
+            "category": category_value,
             "room_id": room_id,
             "x": float(it.cx),
             "y": float(it.cy),
@@ -590,14 +630,26 @@ async def _run_for_floor(
     client: Any,
     model: str,
     concurrency: int,
+    render_mode: str,
+    export_seg: bool,
+    export_cad: bool,
+    seg_target: str,
+    skip_interior: bool,
 ) -> None:
     renderer = _load_local_renderer()
     coarse = _flatten_floor_to_elements(floor_id, building_dict, floor_w, floor_h)
 
-    coarse_json = out_dir / f"coarse_layout_{floor_id}.json"
+    coarse_json = out_dir / f"layout_{floor_id}.json"
     coarse_png = out_dir / f"coarse_layout_{floor_id}.png"
+    coarse_mask = out_dir / f"mask_{floor_id}.png"
     _write_json(coarse_json, coarse)
-    renderer._render(coarse, coarse_png)
+    if export_cad:
+        renderer._render(coarse, coarse_png, "cad")
+    if export_seg and seg_target in ("coarse", "both"):
+        renderer._render(coarse, coarse_mask, render_mode)
+
+    if skip_interior:
+        return
 
     rooms = _build_room_inputs(floor_id, coarse)
     sem = asyncio.Semaphore(max(1, int(concurrency)))
@@ -614,9 +666,36 @@ async def _run_for_floor(
                     model=model,
                     time_limit=5.0,
                 )
+                if refined.solver != "ortools_cpsat" or _has_furniture_overlap(refined, r.furnitures):
+                    coarse = LLMCoarseLayout(
+                        reasoning="fallback_to_nonoverlap",
+                        items=[
+                            LLMCoarseLayoutItem(
+                                furniture_id=it.furniture_id,
+                                cx=float(it.cx),
+                                cy=float(it.cy),
+                                rotation=it.rotation,
+                            )
+                            for it in refined.items
+                        ],
+                    )
+                    refined = solve_nonoverlap_layout_greedy(
+                        room=r.boundary,
+                        furnitures=list(r.furnitures),
+                        obstacles=list(r.obstacles),
+                        coarse_layout=coarse,
+                    )
                 return r.room_id, refined
             except Exception:
-                return r.room_id, _gravity_fallback(r.boundary, r.furnitures, r.obstacles)
+                try:
+                    return r.room_id, solve_nonoverlap_layout_greedy(
+                        room=r.boundary,
+                        furnitures=list(r.furnitures),
+                        obstacles=list(r.obstacles),
+                        coarse_layout=None,
+                    )
+                except Exception:
+                    return r.room_id, _gravity_fallback(r.boundary, r.furnitures, r.obstacles)
 
     results = await asyncio.gather(*(_run_one(r) for r in rooms))
 
@@ -632,8 +711,12 @@ async def _run_for_floor(
 
     refined_json = out_dir / f"refined_layout_{floor_id}.json"
     refined_png = out_dir / f"refined_layout_{floor_id}.png"
+    refined_mask = out_dir / f"refined_mask_{floor_id}.png"
     _write_json(refined_json, refined)
-    renderer._render(refined, refined_png)
+    if export_cad:
+        renderer._render(refined, refined_png, "cad")
+    if export_seg and seg_target in ("refined", "both"):
+        renderer._render(refined, refined_mask, render_mode)
 
 
 def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
@@ -645,6 +728,11 @@ def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     p.add_argument("--out-dir", default=None)
     p.add_argument("--concurrency", type=int, default=8)
     p.add_argument("--floors", default=None)
+    p.add_argument("--render-mode", choices=["seg", "cad"], default="seg")
+    p.add_argument("--seg-target", choices=["coarse", "refined", "both"], default="coarse")
+    p.add_argument("--no-seg", dest="export_seg", action="store_false", default=True)
+    p.add_argument("--cad", dest="export_cad", action="store_true", default=False)
+    p.add_argument("--skip-interior", action="store_true", default=False)
     return p.parse_args(argv)
 
 
@@ -700,6 +788,11 @@ async def _main_async(args: argparse.Namespace) -> int:
             client=client,
             model=args.model,
             concurrency=args.concurrency,
+            render_mode=str(args.render_mode),
+            export_seg=bool(args.export_seg),
+            export_cad=bool(args.export_cad),
+            seg_target=str(args.seg_target),
+            skip_interior=bool(args.skip_interior),
         )
 
     print(f"[full_pipeline] Done. See: {out_dir}")

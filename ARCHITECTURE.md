@@ -1,5 +1,6 @@
 # 项目架构与开发指南
-
+- 生成 layout（每层一个）： python scripts/cli_runner.py -p "...prompt..." -m ... -c north -o out/layout.json
+- 输出分割 mask： python scripts/local_renderer.py -i out/layout_F1.json -o out/mask_F1.png --mode seg
 ## 1. 核心架构
 
 本项目采用 **多模型适配 (Multi-Model Adapter)** + **双阶段生成 (Two-Stage Generation)** 的架构设计。

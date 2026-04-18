@@ -89,6 +89,24 @@ def core_tube_to_dict(core_tube: Any) -> dict:
             "area": round(core_tube.staircase_area, 2),
         }
 
+    if hasattr(core_tube, "elevator_hall") and core_tube.elevator_hall is not None:
+        result["elevator_hall"] = {
+            "polygon": [
+                [round(x, 2), round(y, 2)]
+                for x, y in core_tube.elevator_hall.exterior.coords
+            ],
+            "area": round(getattr(core_tube, "elevator_hall_area", 0.0), 2),
+        }
+
+    if hasattr(core_tube, "elevator_shaft") and core_tube.elevator_shaft is not None:
+        result["elevator_shaft"] = {
+            "polygon": [
+                [round(x, 2), round(y, 2)]
+                for x, y in core_tube.elevator_shaft.exterior.coords
+            ],
+            "area": round(getattr(core_tube, "elevator_shaft_area", 0.0), 2),
+        }
+
     return result
 
 
@@ -162,9 +180,24 @@ def building_result_to_dict(
         zone_types: Dict[str, str] = {}
 
         if layout.core_tube is not None and hasattr(layout.core_tube, "polygon") and not layout.core_tube.polygon.is_empty:
-            minx, miny, maxx, maxy = layout.core_tube.polygon.bounds
-            room_rects["core_tube"] = (float(minx), float(miny), float(maxx - minx), float(maxy - miny))
-            zone_types["core_tube"] = "core"
+            ct = layout.core_tube
+            subzones = [
+                ("core_staircase", "staircase", getattr(ct, "staircase", None)),
+                ("core_elevator_hall", "elevator_hall", getattr(ct, "elevator_hall", None)),
+                ("core_elevator_shaft", "elevator_shaft", getattr(ct, "elevator_shaft", None)),
+            ]
+            has_subzones = all(p is not None and hasattr(p, "is_empty") and not p.is_empty for _, _, p in subzones)
+            if has_subzones:
+                for zid, zt, poly in subzones:
+                    if poly is None or poly.is_empty:
+                        continue
+                    minx, miny, maxx, maxy = poly.bounds
+                    room_rects[zid] = (float(minx), float(miny), float(maxx - minx), float(maxy - miny))
+                    zone_types[zid] = zt
+            else:
+                minx, miny, maxx, maxy = ct.polygon.bounds
+                room_rects["core_tube"] = (float(minx), float(miny), float(maxx - minx), float(maxy - miny))
+                zone_types["core_tube"] = "core"
 
         if hasattr(layout, "corridors") and layout.corridors:
             for c in layout.corridors:
@@ -207,6 +240,7 @@ def building_result_to_dict(
                 room_rects=room_rects,
                 edge_set=edge_set,
                 floor_bounds=floor_boundary.bounds,
+                zone_types=zone_types,
             )
         else:
             pp_walls = generate_wall_mesh(

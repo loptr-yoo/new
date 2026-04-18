@@ -5,7 +5,7 @@ from typing import List, Optional
 
 from .coarse_layout_agent import AsyncOpenAI, generate_coarse_layout
 from .models import FurnitureSpec, Obstacle, RefinedLayout, RefinedLayoutItem, RoomBoundary
-from .refine_solver import solve_refined_layout
+from .refine_solver import solve_nonoverlap_layout_greedy, solve_refined_layout
 
 logger = logging.getLogger(__name__)
 
@@ -45,23 +45,30 @@ async def layout_room_pipeline(
     except Exception as e:
         logger.warning(f"Refine solver failed, fallback to coarse layout: {type(e).__name__}: {e}")
 
-    items = [
-        RefinedLayoutItem(
-            furniture_id=it.furniture_id,
-            cx=it.cx,
-            cy=it.cy,
-            rotation=it.rotation,
+    try:
+        return solve_nonoverlap_layout_greedy(
+            room=room,
+            furnitures=furnitures,
+            obstacles=obstacles,
+            coarse_layout=coarse,
         )
-        for it in coarse.items
-    ]
+    except Exception as e2:
+        logger.warning(f"Greedy pack failed, fallback to coarse layout: {type(e2).__name__}: {e2}")
+
+    items = [RefinedLayoutItem(
+        furniture_id=it.furniture_id,
+        cx=it.cx,
+        cy=it.cy,
+        rotation=it.rotation,
+    ) for it in coarse.items]
     return RefinedLayout(
         status="fallback",
         solver="fallback_coarse",
         objective_l1=None,
         reasoning="\n".join([
-            "- Fallback: solver failed within time limit or became infeasible",
-            "- Return coarse layout to keep API responsive",
+            "- Fallback: solver+greedy both failed",
+            "- Return coarse layout to keep pipeline running",
         ]),
         items=items,
-        warnings=["refine_solver_failed"],
+        warnings=["refine_solver_failed", "greedy_pack_failed"],
     )

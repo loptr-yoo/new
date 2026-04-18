@@ -167,3 +167,16 @@ out/test_gemini_1/layout_F2.svg
 out/test_gemini_north/layout_F1_regen.json
 out/test_gemini_north/layout_F1_regen.png
 out/test_gemini_north/layout_F1_regen.svg
+out/layout_F1.json
+out/layout_F2.json
+out/refined_layout_F1.json
+out/refined_layout_F2.json
+out/refined_mask_F1.png
+out/refined_mask_F2.png
+out/test_gemini_north/refined_layout_F1_nooverlap.json
+out/test_gemini_north/refined_layout_F1.json
+out/test_gemini_north/refined_layout_F2.json
+out/test_gemini_north/refined_mask_F1_nooverlap.png
+out/test_gemini_north/refined_mask_F1.png
+out/test_gemini_north/refined_mask_F2.png
+ARCHITECTURE.md

@@ -29,7 +29,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple, cast
 
 try:
     import matplotlib  # type: ignore[import-not-found]
@@ -43,6 +43,15 @@ except ImportError as e:
     )
 
 matplotlib.use("Agg")
+
+PROJECT_ROOT = str(Path(__file__).resolve().parent.parent)
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
+try:
+    from backend.core.geometry.style_constants import SEGMENTATION_COLORS  # type: ignore[import-not-found]
+except Exception:
+    SEGMENTATION_COLORS = {}
 
 
 COLOR_MAP: Dict[str, str] = {
@@ -67,6 +76,8 @@ DEFAULT_ZORDER: Dict[str, int] = {
     "floor_slab": 10,
     "corridor": 20,
     "elevator": 30,
+    "elevator_hall": 30,
+    "elevator_shaft": 30,
     "staircase": 30,
     "wall": 80,
     "partition_wall": 80,
@@ -109,12 +120,78 @@ def _draw_polygon(ax: Any, elem: Dict[str, Any]) -> None:
         _warn(f"Skip polygon element (invalid polygon): id={elem.get('id')} type={t}")
         return
     poly = _close_polygon(poly)
-    points = [(float(x), float(y)) for x, y in poly]
+    points: List[List[float]] = [[float(x), float(y)] for x, y in poly]
 
     face = "#334155" if _is_wall_type(t) else COLOR_MAP.get(t, "#94a3b8")
     z = _zorder(elem)
 
-    patch = patches.Polygon(points, closed=True, facecolor=face, edgecolor="none", alpha=1.0, zorder=z)  # type: ignore[arg-type]
+    patch = patches.Polygon(
+        cast(Any, points),
+        closed=True,
+        facecolor=face,
+        edgecolor="none",
+        linewidth=0,
+        antialiased=False,
+        alpha=1.0,
+        zorder=z,
+    )
+    ax.add_patch(patch)
+
+
+def _seg_canonical_type(elem: Dict[str, Any]) -> str:
+    t = str(elem.get("type") or "")
+    t_lower = t.lower()
+    if t == "furniture":
+        cat = elem.get("category")
+        if isinstance(cat, str) and cat:
+            return cat
+        return "__furniture_unknown__"
+    if "wall" in t_lower:
+        return "wall"
+    if t in {"elevator", "elevator_shaft"}:
+        return "elevator"
+    if t == "staircase":
+        return "staircase"
+    if t == "floor_slab":
+        return "floor_slab"
+    if t == "door":
+        return "door"
+    if t == "window":
+        return "window"
+    if t == "column":
+        return "column"
+    return "room_default"
+
+
+def _seg_facecolor(elem: Dict[str, Any]) -> str:
+    ct = _seg_canonical_type(elem)
+    if ct == "__furniture_unknown__":
+        return "#FF00FF"
+    if ct == "__unknown__":
+        return "#FF00FF"
+    if isinstance(SEGMENTATION_COLORS, dict) and ct in SEGMENTATION_COLORS:
+        return str(SEGMENTATION_COLORS[ct])
+    return "#FF00FF"
+
+
+def _draw_polygon_seg(ax: Any, elem: Dict[str, Any]) -> None:
+    poly = elem.get("polygon") or []
+    if not isinstance(poly, list) or len(poly) < 3:
+        return
+    poly = _close_polygon(poly)
+    points: List[List[float]] = [[float(x), float(y)] for x, y in poly]
+    z = _zorder(elem)
+    face = _seg_facecolor(elem)
+    patch = patches.Polygon(
+        cast(Any, points),
+        closed=True,
+        facecolor=face,
+        edgecolor="none",
+        linewidth=0,
+        antialiased=False,
+        alpha=1.0,
+        zorder=z,
+    )
     ax.add_patch(patch)
 
 
@@ -161,10 +238,25 @@ def _draw_rect(ax: Any, elem: Dict[str, Any], facecolor: str) -> None:
         blx, bly = x, y
         cx, cy = blx + w / 2, bly + h / 2
 
-    rect = patches.Rectangle((blx, bly), w, h, facecolor=facecolor, edgecolor="none", alpha=1.0, zorder=z)
+    rect = patches.Rectangle(
+        (blx, bly),
+        w,
+        h,
+        facecolor=facecolor,
+        edgecolor="none",
+        linewidth=0,
+        antialiased=False,
+        alpha=1.0,
+        zorder=z,
+    )
     if abs(rotation) > 1e-6:
         rect.set_transform(transforms.Affine2D().rotate_deg_around(cx, cy, rotation) + ax.transData)
     ax.add_patch(rect)
+
+
+def _draw_rect_seg(ax: Any, elem: Dict[str, Any]) -> None:
+    face = _seg_facecolor(elem)
+    _draw_rect(ax, elem, facecolor=face)
 
 
 def _draw_door(ax: Any, elem: Dict[str, Any]) -> None:
@@ -197,11 +289,31 @@ def _draw_door(ax: Any, elem: Dict[str, Any]) -> None:
 
     t = transforms.Affine2D().rotate_deg_around(cx, cy, rotation) + ax.transData
 
-    eraser = patches.Rectangle((blx, bly), w, h, facecolor="#ffffff", edgecolor="none", alpha=1.0, zorder=z)
+    eraser = patches.Rectangle(
+        (blx, bly),
+        w,
+        h,
+        facecolor="#ffffff",
+        edgecolor="none",
+        linewidth=0,
+        antialiased=False,
+        alpha=1.0,
+        zorder=z,
+    )
     eraser.set_transform(t)
     ax.add_patch(eraser)
 
-    outline = patches.Rectangle((blx, bly), w, h, facecolor="none", edgecolor="#334155", linewidth=1.2, alpha=1.0, zorder=z + 1)
+    outline = patches.Rectangle(
+        (blx, bly),
+        w,
+        h,
+        facecolor="none",
+        edgecolor="#334155",
+        linewidth=1.2,
+        antialiased=False,
+        alpha=1.0,
+        zorder=z + 1,
+    )
     outline.set_transform(t)
     ax.add_patch(outline)
 
@@ -236,7 +348,17 @@ def _draw_window(ax: Any, elem: Dict[str, Any]) -> None:
 
     t = transforms.Affine2D().rotate_deg_around(cx, cy, rotation) + ax.transData
 
-    eraser = patches.Rectangle((blx, bly), w, h, facecolor="#ffffff", edgecolor="none", alpha=1.0, zorder=z)
+    eraser = patches.Rectangle(
+        (blx, bly),
+        w,
+        h,
+        facecolor="#ffffff",
+        edgecolor="none",
+        linewidth=0,
+        antialiased=False,
+        alpha=1.0,
+        zorder=z,
+    )
     eraser.set_transform(t)
     ax.add_patch(eraser)
 
@@ -246,7 +368,7 @@ def _draw_window(ax: Any, elem: Dict[str, Any]) -> None:
     else:
         x0, y0 = cx, bly
         x1, y1 = cx, bly + h
-    ax.plot([x0, x1], [y0, y1], color="#334155", linewidth=1.6, zorder=z + 1, transform=t)
+    ax.plot([x0, x1], [y0, y1], color="#334155", linewidth=1.6, zorder=z + 1, transform=t, antialiased=False)
 
 
 CUSTOM_DRAW_HOOKS: Dict[str, Callable[[Any, Dict[str, Any]], None]] = {
@@ -262,7 +384,7 @@ def _load_layout(path: Path) -> Dict[str, Any]:
     raise ValueError("输入 JSON 不包含 elements[]，请使用 cli_runner.py 生成的 layout.json 或导出前端 layout.json。")
 
 
-def _render(layout: Dict[str, Any], out_path: Path) -> None:
+def _render(layout: Dict[str, Any], out_path: Path, mode: str) -> None:
     width = float(layout.get("width") or 0.0)
     height = float(layout.get("height") or 0.0)
     if width <= 0 or height <= 0:
@@ -279,40 +401,57 @@ def _render(layout: Dict[str, Any], out_path: Path) -> None:
     fig.set_facecolor("#ffffff")
     ax.set_facecolor("#ffffff")
 
-    # 给四周留出 0.5 米的物理边距，防止外墙及可能悬挑的元素被切除
-    padding = 0.5
-    ax.set_xlim(0.0 - padding, width + padding)
-    ax.set_ylim(0.0 - padding, height + padding)
+    if mode == "seg":
+        ax.set_xlim(0.0, width)
+        ax.set_ylim(0.0, height)
+        fig.subplots_adjust(left=0.0, right=1.0, bottom=0.0, top=1.0)
+        ax.set_position([0.0, 0.0, 1.0, 1.0])
+    else:
+        padding = 0.5
+        ax.set_xlim(0.0 - padding, width + padding)
+        ax.set_ylim(0.0 - padding, height + padding)
     ax.set_aspect("equal")
     ax.axis("off")
 
     def sort_key(e: Dict[str, Any]) -> Tuple[int, str]:
         return (_zorder(e), str(e.get("id") or ""))
 
+    if mode == "seg":
+        matplotlib.rcParams["path.simplify"] = False
+
     for elem in sorted((e for e in elements if isinstance(e, dict)), key=sort_key):
         t = str(elem.get("type") or "")
 
-        if t in CUSTOM_DRAW_HOOKS:
+        if mode != "seg" and t in CUSTOM_DRAW_HOOKS:
             CUSTOM_DRAW_HOOKS[t](ax, elem)
             continue
 
         poly = elem.get("polygon")
         if isinstance(poly, list) and len(poly) >= 3:
-            _draw_polygon(ax, elem)
+            if mode == "seg":
+                _draw_polygon_seg(ax, elem)
+            else:
+                _draw_polygon(ax, elem)
             continue
 
         if all(k in elem for k in ("x", "y", "width", "height")):
-            if _is_wall_type(t):
-                _draw_rect(ax, elem, facecolor="#334155")
+            if mode == "seg":
+                _draw_rect_seg(ax, elem)
             else:
-                _draw_rect(ax, elem, facecolor=COLOR_MAP.get(t, "#94a3b8"))
+                if _is_wall_type(t):
+                    _draw_rect(ax, elem, facecolor="#334155")
+                else:
+                    _draw_rect(ax, elem, facecolor=COLOR_MAP.get(t, "#94a3b8"))
             continue
 
         _warn(f"Skip element (unknown schema): id={elem.get('id')} type={t}")
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     if out_path.suffix.lower() == ".png":
-        fig.savefig(str(out_path), dpi=300, bbox_inches="tight", pad_inches=0.02)
+        if mode == "seg":
+            fig.savefig(str(out_path), dpi=300, bbox_inches=None, pad_inches=0)
+        else:
+            fig.savefig(str(out_path), dpi=300, bbox_inches="tight", pad_inches=0.02)
     else:
         fig.savefig(str(out_path), bbox_inches="tight", pad_inches=0.02)
     plt.close(fig)
@@ -322,13 +461,14 @@ def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Headless local renderer (Matplotlib CAD style)")
     p.add_argument("-i", "--input", required=True, help="输入 layout.json（width/height/elements[]）")
     p.add_argument("-o", "--output", required=True, help="输出文件路径（.png 或 .svg）")
+    p.add_argument("--mode", choices=["seg", "cad"], default="seg", help="渲染模式：seg=语义分割（离散色表，无AA），cad=CAD 风格")
     return p.parse_args(argv)
 
 
 def main() -> int:
     args = _parse_args()
     layout = _load_layout(Path(args.input))
-    _render(layout, Path(args.output))
+    _render(layout, Path(args.output), str(args.mode))
     print(f"[local_renderer] Wrote: {args.output}")
     return 0
 

@@ -45,6 +45,8 @@ Z_ORDER_MAP: Dict[str, int] = {
     "floor_slab": 10,
     "corridor": 20,
     "elevator": 30,
+    "elevator_hall": 30,
+    "elevator_shaft": 30,
     "staircase": 30,
     "partition_wall": 80,
     "exterior_wall": 80,
@@ -62,6 +64,8 @@ def _is_room_type(t: str) -> bool:
         "floor_slab",
         "corridor",
         "elevator",
+        "elevator_hall",
+        "elevator_shaft",
         "staircase",
         "partition_wall",
         "exterior_wall",
@@ -212,7 +216,12 @@ def _flatten_floor_to_elements(
     # Layer 4: core tube sub-areas (optional, keep as polygons if present)
     core = building_dict.get("core_tube") or {}
     if isinstance(core, dict):
-        for key, etype in (("elevator", "elevator"), ("staircase", "staircase")):
+        for key, etype in (
+            ("staircase", "staircase"),
+            ("elevator_hall", "elevator_hall"),
+            ("elevator_shaft", "elevator_shaft"),
+            ("elevator", "elevator"),
+        ):
             info = core.get(key)
             if not isinstance(info, dict):
                 continue
