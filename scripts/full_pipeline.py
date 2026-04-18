@@ -4,15 +4,17 @@ import argparse
 import asyncio
 import importlib.util
 import json
+import logging
 import random
 import sys
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from dotenv import load_dotenv
-from shapely.geometry import Polygon
+from shapely.geometry import MultiPolygon, Point, Polygon
 
 PROJECT_ROOT = str(Path(__file__).resolve().parent.parent)
 if PROJECT_ROOT not in sys.path:
@@ -29,6 +31,26 @@ from backend.core.interior.refine_solver import solve_nonoverlap_layout_greedy
 from backend.core.llm.provider import create_llm_client
 from backend.models import GenerateSemanticsRequest, SceneType
 
+PIPELINE_LOGGER = logging.getLogger("pipeline")
+
+
+def _configure_pipeline_logging() -> None:
+    if PIPELINE_LOGGER.handlers:
+        return
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(logging.Formatter("[%(name)s] %(levelname)s %(message)s"))
+    PIPELINE_LOGGER.addHandler(handler)
+    PIPELINE_LOGGER.setLevel(logging.INFO)
+    PIPELINE_LOGGER.propagate = False
+
+
+def _log_step(step_no: int, title: str, **details: Any) -> None:
+    banner = f"========== STEP {step_no}: {title} =========="
+    PIPELINE_LOGGER.info(banner)
+    if details:
+        detail_text = ", ".join(f"{k}={v}" for k, v in details.items())
+        PIPELINE_LOGGER.info("details: %s", detail_text)
+
 
 @dataclass(frozen=True)
 class RoomInput:
@@ -39,6 +61,7 @@ class RoomInput:
     boundary: RoomBoundary
     furnitures: List[FurnitureSpec]
     obstacles: List[Obstacle]
+    core_region: Optional[Polygon]
 
 
 def _is_room_type(t: str) -> bool:
@@ -56,6 +79,28 @@ def _is_room_type(t: str) -> bool:
         "window",
     }
     return (t or "") not in structural
+
+
+def _is_furnishable_room(room_type: str, boundary: RoomBoundary) -> bool:
+    t = (room_type or "").lower()
+    allowed = {"bedroom", "living_room", "kitchen", "bathroom", "study", "dining_room"}
+    if t not in allowed:
+        return False
+    w = float(boundary.x_max - boundary.x_min)
+    h = float(boundary.y_max - boundary.y_min)
+    if w <= 0 or h <= 0:
+        return False
+    area = w * h
+    mn = min(w, h)
+    mx = max(w, h)
+    ratio = (mx / mn) if mn > 1e-6 else 999.0
+    if mn < 1.2:
+        return False
+    if area < 3.0:
+        return False
+    if ratio > 6.0:
+        return False
+    return True
 
 
 def _bounds_from_polygon(poly: Sequence[Sequence[float]]) -> Optional[Tuple[float, float, float, float]]:
@@ -440,9 +485,25 @@ def _build_room_inputs(floor_id: str, floor_layout: Dict[str, Any]) -> List[Room
             continue
 
         boundary = _room_boundary_from_polygon(poly)
+        if not _is_furnishable_room(room_type, boundary):
+            continue
         furns = furnitures_for_room(room_type)
         if not furns:
             continue
+
+        core_region: Optional[Polygon] = None
+        try:
+            room_poly = Polygon([(float(x), float(y)) for x, y in poly])
+            if not room_poly.is_empty and room_poly.is_valid:
+                min_depth = min(min(float(f.width), float(f.height)) for f in furns)
+                buffer_dist = (min_depth / 2.0) + 0.3
+                shrunk = room_poly.buffer(-float(buffer_dist))
+                if isinstance(shrunk, MultiPolygon) and (not shrunk.is_empty):
+                    shrunk = max(shrunk.geoms, key=lambda g: float(getattr(g, "area", 0.0)), default=None)
+                if isinstance(shrunk, Polygon) and (not shrunk.is_empty) and shrunk.area > 0.2:
+                    core_region = shrunk
+        except Exception:
+            core_region = None
 
         obstacles: List[Obstacle] = []
         door_elems = door_rooms.get(room_id, [])
@@ -478,6 +539,7 @@ def _build_room_inputs(floor_id: str, floor_layout: Dict[str, Any]) -> List[Room
             boundary=boundary,
             furnitures=furns,
             obstacles=obstacles,
+            core_region=core_region,
         ))
     return out
 
@@ -636,6 +698,15 @@ async def _run_for_floor(
     seg_target: str,
     skip_interior: bool,
 ) -> None:
+    floor_t0 = time.perf_counter()
+    PIPELINE_LOGGER.info(
+        "---------- FLOOR %s START (render_mode=%s, seg_target=%s, skip_interior=%s) ----------",
+        floor_id,
+        render_mode,
+        seg_target,
+        skip_interior,
+    )
+
     renderer = _load_local_renderer()
     coarse = _flatten_floor_to_elements(floor_id, building_dict, floor_w, floor_h)
 
@@ -657,6 +728,10 @@ async def _run_for_floor(
     async def _run_one(r: RoomInput) -> Tuple[str, RefinedLayout]:
         await asyncio.sleep(random.uniform(0.0, 0.3))
         async with sem:
+            center_validator = None
+            if r.core_region is not None:
+                core_poly = r.core_region
+                center_validator = lambda cx, cy, _p=core_poly: bool(_p.contains(Point(float(cx), float(cy))))
             try:
                 refined = await layout_room_pipeline(
                     room=r.boundary,
@@ -684,6 +759,7 @@ async def _run_for_floor(
                         furnitures=list(r.furnitures),
                         obstacles=list(r.obstacles),
                         coarse_layout=coarse,
+                        center_validator=center_validator,
                     )
                 return r.room_id, refined
             except Exception:
@@ -693,6 +769,7 @@ async def _run_for_floor(
                         furnitures=list(r.furnitures),
                         obstacles=list(r.obstacles),
                         coarse_layout=None,
+                        center_validator=center_validator,
                     )
                 except Exception:
                     return r.room_id, _gravity_fallback(r.boundary, r.furnitures, r.obstacles)
@@ -718,6 +795,14 @@ async def _run_for_floor(
     if export_seg and seg_target in ("refined", "both"):
         renderer._render(refined, refined_mask, render_mode)
 
+    PIPELINE_LOGGER.info(
+        "---------- FLOOR %s DONE (rooms=%d, elapsed_ms=%.1f, outputs=%s) ----------",
+        floor_id,
+        len(rooms),
+        (time.perf_counter() - floor_t0) * 1000,
+        out_dir,
+    )
+
 
 def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     p = argparse.ArgumentParser()
@@ -737,6 +822,7 @@ def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
 
 
 async def _main_async(args: argparse.Namespace) -> int:
+    _log_step(1, "解析输入参数与模型配置", model=args.model, core=args.core, out_dir=args.out_dir, render_mode=args.render_mode, seg_target=args.seg_target)
     req = GenerateSemanticsRequest(
         scene_type=SceneType.BUILDING,
         user_prompt=args.prompt,
@@ -746,10 +832,12 @@ async def _main_async(args: argparse.Namespace) -> int:
     provider, _, _ = building_semantic_flow._pick_provider_model_and_key(req)
     client = create_llm_client(provider)  # type: ignore[arg-type]
 
+    _log_step(2, "生成建筑语义")
     allocation, parse_warnings = await building_semantic_flow.generate_building_semantics(req)
     if parse_warnings:
-        print(f"[full_pipeline] parse_warnings: {parse_warnings}", file=sys.stderr)
+        PIPELINE_LOGGER.warning("parse_warnings: %s", parse_warnings)
 
+    _log_step(3, "生成拓扑与核心筒")
     floor_w, floor_h, floor_boundary = _derive_floor_boundary_from_allocation(allocation)
     corridor_width, core_area_ratio = _pick_corridor_width_and_core_ratio(floor_w * floor_h)
 
@@ -766,7 +854,7 @@ async def _main_async(args: argparse.Namespace) -> int:
             position=args.core,
         )
     except Exception as e:
-        print(f"[full_pipeline] core override failed: {type(e).__name__}: {e}", file=sys.stderr)
+        PIPELINE_LOGGER.warning("core override failed: %s: %s", type(e).__name__, e)
 
     building_result = orchestrator.generate(allocation)
     building_dict = building_result_to_dict(building_result, floor_boundary)
@@ -778,7 +866,9 @@ async def _main_async(args: argparse.Namespace) -> int:
     out_dir = Path(args.out_dir) if args.out_dir else (Path(PROJECT_ROOT) / "out" / (datetime.now().strftime("%Y%m%d_%H%M%S_full")))
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    _log_step(4, "逐层导出粗布局/渲染", selected_floors=selected)
     for fid in selected:
+        _log_step(5, "逐层执行室内布局与细化", floor_id=fid)
         await _run_for_floor(
             floor_id=fid,
             building_dict=building_dict,
@@ -795,11 +885,13 @@ async def _main_async(args: argparse.Namespace) -> int:
             skip_interior=bool(args.skip_interior),
         )
 
-    print(f"[full_pipeline] Done. See: {out_dir}")
+    _log_step(6, "导出完成", output_dir=out_dir)
+    PIPELINE_LOGGER.info("Done. See: %s", out_dir)
     return 0
 
 
 def main() -> int:
+    _configure_pipeline_logging()
     load_dotenv()
     args = _parse_args()
     return asyncio.run(_main_async(args))

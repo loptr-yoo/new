@@ -4,7 +4,7 @@ import importlib
 import logging
 import math
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple, cast
+from typing import Any, Callable, Dict, List, Optional, Tuple, cast
 
 cp_model = importlib.import_module("ortools.sat.python.cp_model")
 
@@ -20,6 +20,7 @@ SCALE = 100
 class _ResolvedItem:
     furniture_id: str
     rotation: int
+    priority: int
     w_s: int
     h_s: int
     hw_s: int
@@ -74,6 +75,7 @@ def _resolve_inputs(
         items.append(_ResolvedItem(
             furniture_id=it.furniture_id,
             rotation=rot,
+            priority=int(getattr(spec, "priority", 1)),
             w_s=w_s,
             h_s=h_s,
             hw_s=hw_s,
@@ -221,6 +223,7 @@ def solve_nonoverlap_layout_greedy(
     coarse_layout: Optional[LLMCoarseLayout] = None,
     step: float = 0.1,
     margin: float = 0.05,
+    center_validator: Optional[Callable[[float, float], bool]] = None,
 ) -> RefinedLayout:
     room_xmin_s = _to_int(room.x_min)
     room_ymin_s = _to_int(room.y_min)
@@ -243,6 +246,7 @@ def solve_nonoverlap_layout_greedy(
             items.append(_ResolvedItem(
                 furniture_id=f.id,
                 rotation=0,
+                priority=int(getattr(f, "priority", 1)),
                 w_s=w_s,
                 h_s=h_s,
                 hw_s=hw_s,
@@ -278,9 +282,17 @@ def solve_nonoverlap_layout_greedy(
         bx0, by0, bx1, by1 = b
         return (min(ax1, bx1) > max(ax0, bx0)) and (min(ay1, by1) > max(ay0, by0))
 
-    def _valid_rect(rect: Tuple[int, int, int, int], placed: List[Tuple[int, int, int, int]]) -> bool:
+    def _valid_rect(
+        rect: Tuple[int, int, int, int],
+        placed: List[Tuple[int, int, int, int]],
+        center_s: Optional[Tuple[int, int]] = None,
+    ) -> bool:
         if not _inside_room(*rect):
             return False
+        if center_validator is not None and center_s is not None:
+            cx, cy = center_s
+            if not center_validator(cx / SCALE, cy / SCALE):
+                return False
         for o in obs_rects:
             if _overlaps(rect, o):
                 return False
@@ -342,15 +354,16 @@ def solve_nonoverlap_layout_greedy(
             y += step_s
         return out
 
-    items_sorted = sorted(items, key=lambda it: it.w_s * it.h_s, reverse=True)
+    items_sorted = sorted(items, key=lambda it: (it.priority, -(it.w_s * it.h_s)))
     placed_rects: List[Tuple[int, int, int, int]] = []
     placed_centers: Dict[str, Tuple[int, int]] = {}
+    dropped: List[str] = []
 
     for it in items_sorted:
         placed = False
         for cx_s, cy_s in _candidate_centers(it):
             rect = _rect_for_center(it, cx_s, cy_s)
-            if _valid_rect(rect, placed_rects):
+            if _valid_rect(rect, placed_rects, center_s=(cx_s, cy_s)):
                 placed_rects.append(rect)
                 placed_centers[it.furniture_id] = (cx_s, cy_s)
                 placed = True
@@ -359,18 +372,19 @@ def solve_nonoverlap_layout_greedy(
             continue
         for cx_s, cy_s in _scan_centers(it):
             rect = _rect_for_center(it, cx_s, cy_s)
-            if _valid_rect(rect, placed_rects):
+            if _valid_rect(rect, placed_rects, center_s=(cx_s, cy_s)):
                 placed_rects.append(rect)
                 placed_centers[it.furniture_id] = (cx_s, cy_s)
                 placed = True
                 break
         if not placed:
-            cx_s, cy_s = _clamp_center(it, it.x_llm_s, it.y_llm_s)
-            placed_centers[it.furniture_id] = (cx_s, cy_s)
+            dropped.append(it.furniture_id)
 
     out_items: List[RefinedLayoutItem] = []
     for it in items:
-        cx_s, cy_s = placed_centers.get(it.furniture_id, (it.x_llm_s, it.y_llm_s))
+        if it.furniture_id not in placed_centers:
+            continue
+        cx_s, cy_s = placed_centers[it.furniture_id]
         out_items.append(RefinedLayoutItem(
             furniture_id=it.furniture_id,
             cx=round(cx_s / SCALE, 4),
@@ -387,5 +401,5 @@ def solve_nonoverlap_layout_greedy(
             "- Prefer staying near coarse centers when provided",
         ]),
         items=out_items,
-        warnings=["nonoverlap_greedy_fallback"],
+        warnings=(["nonoverlap_greedy_fallback"] + ([f"dropped_furnitures={dropped}"] if dropped else [])),
     )

@@ -25,6 +25,7 @@ class FurnitureSpec(BaseModel):
     category: FurnitureCategory
     width: float = Field(..., gt=0)
     height: float = Field(..., gt=0)
+    priority: int = Field(1, ge=0, le=10)
 
 
 class RoomBoundary(BaseModel):

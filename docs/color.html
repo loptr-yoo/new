@@ -70,7 +70,9 @@
     <!-- Building -->
     <div class="section" id="building">
         <h2>Building Scene <span class="badge">= Floor Plan styles</span></h2>
-        <p style="color:var(--muted);font-size:12px;margin-bottom:12px">Building 场景复用楼层平面的全部颜色。每层楼的 sceneId 设为 building_floor_plan。</p>
+        <p style="color:var(--muted);font-size:12px;margin-bottom:12px">Building（Segmentation 渲染）：颜色严格来自本地渲染器的分割调色板（render-mode=seg），为固定常量（非随机）。</p>
+        <div class="dark-preview" id="building-preview"></div>
+        <div class="grid" id="building-grid"></div>
     </div>
 
     <!-- Generic -->
@@ -88,11 +90,10 @@
 </div>
 
 <script>
-// ====== Data from buildingColorScheme.json v2.0.0 ======
-const shared = new Set(['pillar','staircase','elevator','wall','ground']);
+// ====== Data from buildingColorScheme.json v2.1.0 ======
 
 const parkingColors = {
-    ground:'#1e293b', wall:'#475569', pillar:'#94a3b8',
+    ground:'#1e293b', wall:'#334155', pillar:'#94a3b8',
     driving_lane:'#1e293b', pedestrian_path:'#475569', slope:'#c026d3',
     entrance:'#15803d', exit:'#b91c1c', parking_space:'#3b82f6',
     ground_line:'#facc15', deceleration_zone:'#eab308',
@@ -103,7 +104,7 @@ const parkingColors = {
 
 const floorColors = {
     // Structure
-    floor_slab:'#1e293b', wall:'#475569', pillar:'#94a3b8',
+    floor_slab:'#1e293b', wall:'#334155', pillar:'#94a3b8',
     window:'#a5b4fc', door:'#e2e8f0', fire_door:'#dc2626',
     // Circulation
     corridor:'#cbd5e1', lobby:'#9ca3af', aisle:'#a1a1aa',
@@ -111,7 +112,8 @@ const floorColors = {
     pipe_shaft:'#064e3b',
     // Residential zones
     kitchen:'#fb923c', bathroom:'#2dd4bf',
-    living_room:'#a78bfa', bedroom:'#818cf8', storage:'#a8a29e',
+    living_room:'#a78bfa', bedroom:'#818cf8', master_bedroom:'#6366f1',
+    dining_room:'#f97316', dining:'#f97316', study:'#8b5cf6', storage:'#a8a29e',
     // Office / Commercial
     office:'#60a5fa', open_office:'#93c5fd',
     conference_room:'#c084fc', meeting_room:'#c084fc',
@@ -126,6 +128,28 @@ const floorColors = {
     balcony:'#86efac', terrace:'#6ee7b7',
     // Retail
     retail:'#f472b6', shop:'#f472b6', food_court:'#fb923c', kiosk:'#fbbf24'
+};
+
+const shared = new Set(
+    Object.keys(parkingColors).filter((k) => Object.prototype.hasOwnProperty.call(floorColors, k))
+);
+
+const buildingColors = {
+    '墙面': '#333333',
+    '柱子': '#000000',
+    '门': '#8B4513',
+    '窗': '#87CEEB',
+    '地面': '#EEEEEE',
+    '楼梯': '#FFA500',
+    '电梯': '#800080',
+    '床具': '#4169E1',
+    '坐具': '#20B2AA',
+    '电器': '#FF4500',
+    '柜子': '#7FFF00',
+    '桌子': '#CD853F',
+    '椅子': '#F0E68C',
+    '挂件': '#FF1493',
+    '摆件': '#32CD32',
 };
 
 // From sceneRegistry.ts GenericScene.styles (hardcoded, not in JSON)
@@ -213,6 +237,10 @@ document.getElementById('parking-grid').innerHTML =
 document.getElementById('floor-preview').innerHTML = chips(floorColors);
 document.getElementById('floor-grid').innerHTML =
     Object.entries(floorColors).map(([k,c]) => perElementCard(k, c, shared.has(k), false)).join('');
+
+document.getElementById('building-preview').innerHTML = chips(buildingColors);
+document.getElementById('building-grid').innerHTML =
+    Object.entries(buildingColors).map(([k,c]) => perElementCard(k, c, false, false)).join('');
 
 document.getElementById('generic-grid').innerHTML = genericColors.map(simpleCard).join('');
 document.getElementById('fallback-grid').innerHTML = fallbackColors.map(simpleCard).join('');

@@ -26,6 +26,7 @@ from shapely.geometry import (
     box,
 )
 from shapely.geometry.base import BaseGeometry
+from shapely.ops import snap
 
 logger = logging.getLogger(__name__)
 
@@ -165,8 +166,77 @@ def generate_walls_from_topology(
     """
     walls: List[WallSegment] = []
     fminx, fminy, fmaxx, fmaxy = floor_bounds
+    snap_tolerance = 0.2
 
     floor_poly = box(fminx, fminy, fmaxx, fmaxy)
+
+    def _snap_room_rects(
+        rects: Dict[str, Tuple[float, float, float, float]],
+        tolerance: float,
+    ) -> Dict[str, Tuple[float, float, float, float]]:
+        if tolerance <= 0 or len(rects) < 2:
+            return rects
+        poly_map: Dict[str, Polygon] = {}
+        for zid, (x, y, w, h) in rects.items():
+            if w <= 0 or h <= 0:
+                continue
+            poly_map[zid] = box(float(x), float(y), float(x + w), float(y + h))
+        ids = list(poly_map.keys())
+        for i in range(len(ids)):
+            ida = ids[i]
+            pa = poly_map[ida]
+            for j in range(i + 1, len(ids)):
+                idb = ids[j]
+                pb = poly_map[idb]
+                try:
+                    pa = snap(pa, pb, tolerance)
+                    pb = snap(pb, pa, tolerance)
+                    if isinstance(pa, Polygon) and not pa.is_empty:
+                        poly_map[ida] = pa
+                    if isinstance(pb, Polygon) and not pb.is_empty:
+                        poly_map[idb] = pb
+                except Exception:
+                    continue
+        out: Dict[str, Tuple[float, float, float, float]] = dict(rects)
+        for zid, p in poly_map.items():
+            minx, miny, maxx, maxy = p.bounds
+            out[zid] = (float(minx), float(miny), float(maxx - minx), float(maxy - miny))
+        return out
+
+    room_rects = _snap_room_rects(room_rects, tolerance=snap_tolerance)
+    edge_set_aug: Dict[FrozenSet[str], str] = dict(edge_set)
+
+    def _augment_edge_set_from_rects(
+        rects: Dict[str, Tuple[float, float, float, float]],
+        edges: Dict[FrozenSet[str], str],
+        tol: float,
+    ) -> None:
+        ids = list(rects.keys())
+        for i in range(len(ids)):
+            ida = ids[i]
+            ax, ay, aw, ah = rects[ida]
+            for j in range(i + 1, len(ids)):
+                idb = ids[j]
+                key = frozenset({ida, idb})
+                if key in edges:
+                    continue
+                bx, by, bw, bh = rects[idb]
+                overlap_y = min(ay + ah, by + bh) - max(ay, by)
+                overlap_x = min(ax + aw, bx + bw) - max(ax, bx)
+                near_vertical = min(
+                    abs((ax + aw) - bx),
+                    abs(ax - (bx + bw)),
+                ) <= tol
+                near_horizontal = min(
+                    abs((ay + ah) - by),
+                    abs(ay - (by + bh)),
+                ) <= tol
+                if near_vertical and overlap_y > min_wall_length:
+                    edges[key] = "vertical"
+                elif near_horizontal and overlap_x > min_wall_length:
+                    edges[key] = "horizontal"
+
+    _augment_edge_set_from_rects(room_rects, edge_set_aug, tol=snap_tolerance)
 
     def _clip_line_to_floor(line: LineString) -> LineString:
         try:
@@ -178,7 +248,7 @@ def generate_walls_from_topology(
             return line
         return max(candidates, key=lambda s: s.length)
 
-    for edge_key, orientation in edge_set.items():
+    for edge_key, orientation in edge_set_aug.items():
         id_a, id_b = tuple(edge_key)
         if id_a not in room_rects or id_b not in room_rects:
             continue
@@ -256,12 +326,14 @@ def generate_walls_from_topology(
             continue
         if float(w) <= min_wall_length:
             continue
-        line = _extend_line(LineString([(float(x), top_y), (float(x + w), top_y)]), wall_thickness / 2)
+        gap = max(0.0, inner_ymax - top_y)
+        safe_thickness = min(float(wall_thickness), max(0.02, gap - 0.01))
+        line = _extend_line(LineString([(float(x), top_y), (float(x + w), top_y)]), safe_thickness / 2)
         line = _clip_line_to_floor(line)
         walls.append(WallSegment(
             type="partition_wall",
             geometry=line,
-            thickness=wall_thickness,
+            thickness=safe_thickness,
             room_ids=[zid],
         ))
 

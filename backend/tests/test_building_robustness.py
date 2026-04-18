@@ -973,5 +973,114 @@ class TestRealPromptE2E:
         assert alloc.floors[1].rooms[2].size_hint == "small"
 
 
+class TestSemanticRetryPolicy:
+
+    def _make_semantic_solver(self):
+        from shapely.geometry import box
+        from backend.core.geometry.island_partition_solver import SemanticIslandPartitionSolver
+        from backend.core.geometry.room_spec import RoomSpec, ZoneType, IslandContext, SolverConfig
+
+        rooms = [
+            RoomSpec(
+                room_id="r1",
+                room_type="living_room",
+                target_area=20.0,
+                zone=ZoneType.PUBLIC,
+                needs_window=True,
+                needs_corridor_access=True,
+                adjacency_required=["r2"],
+            ),
+            RoomSpec(
+                room_id="r2",
+                room_type="bedroom",
+                target_area=18.0,
+                zone=ZoneType.PRIVATE,
+                needs_window=True,
+                needs_corridor_access=True,
+                adjacency_required=["r1"],
+            ),
+            RoomSpec(
+                room_id="r3",
+                room_type="storage",
+                target_area=6.0,
+                zone=ZoneType.SERVICE,
+                needs_window=False,
+                needs_corridor_access=False,
+                adjacency_required=[],
+            ),
+        ]
+        return SemanticIslandPartitionSolver(
+            island_polygon=box(0, 0, 14, 10),
+            rooms=rooms,
+            adjacency_graph={"r1": ["r2"], "r2": ["r1"]},
+            island_context=IslandContext(
+                exterior_walls=["north", "south", "east", "west"],
+                corridor_edges=["south"],
+            ),
+            config=SolverConfig(time_limit=1.0, num_workers=1, area_tolerance=0.15),
+        )
+
+    def test_infeasible_retries_drop_then_relax(self, monkeypatch):
+        from backend.core.geometry.island_partition_solver import SemanticSolveError
+
+        solver = self._make_semantic_solver()
+        calls = []
+
+        monkeypatch.setattr(solver, "_generate_warm_start", lambda: [])
+        monkeypatch.setattr(solver, "_clip_to_boundary", lambda results: results)
+
+        def fake_solve(_warm_start, corridor_mode="strict", area_tolerance=None, aspect_relax_factor=1.0):
+            calls.append((corridor_mode, area_tolerance, aspect_relax_factor))
+            if len(calls) < 3:
+                raise SemanticSolveError(
+                    "Semantic MIQP solve failed, status: INFEASIBLE",
+                    status_code=3,
+                    status_name="INFEASIBLE",
+                )
+            return [], ["r3"]
+
+        monkeypatch.setattr(solver, "_solve_cpsat", fake_solve)
+
+        out = solver.solve()
+        assert out == []
+        assert len(calls) == 3
+        assert calls[0][0] == "strict"
+        assert calls[1][0] == "strong_only"
+        assert calls[2][0] == "strong_only"
+        assert calls[0][1] == pytest.approx(0.15)
+        assert calls[2][1] == pytest.approx(0.20)
+        assert calls[2][2] > calls[0][2]
+
+    def test_infeasible_all_attempts_then_fallback(self, monkeypatch):
+        from backend.core.geometry.island_partition_solver import SemanticSolveError
+
+        solver = self._make_semantic_solver()
+        attempts = []
+        fallback_called = {"hit": False}
+
+        monkeypatch.setattr(solver, "_generate_warm_start", lambda: [])
+        monkeypatch.setattr(solver, "_clip_to_boundary", lambda results: results)
+
+        def fake_solve(_warm_start, corridor_mode="strict", area_tolerance=None, aspect_relax_factor=1.0):
+            attempts.append((corridor_mode, area_tolerance, aspect_relax_factor))
+            raise SemanticSolveError(
+                "Semantic MIQP solve failed, status: INFEASIBLE",
+                status_code=3,
+                status_name="INFEASIBLE",
+            )
+
+        def fake_fallback():
+            fallback_called["hit"] = True
+            return []
+
+        monkeypatch.setattr(solver, "_solve_cpsat", fake_solve)
+        monkeypatch.setattr(solver, "_fallback_solve", fake_fallback)
+
+        out = solver.solve()
+        assert out == []
+        assert fallback_called["hit"] is True
+        assert len(attempts) == 3
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

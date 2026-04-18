@@ -26,7 +26,9 @@ local_renderer.py
 from __future__ import annotations
 
 import argparse
+import colorsys
 import json
+import math
 import sys
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, cast
@@ -377,6 +379,39 @@ CUSTOM_DRAW_HOOKS: Dict[str, Callable[[Any, Dict[str, Any]], None]] = {
 }
 
 
+def _hex_to_rgb(hex_color: str) -> Tuple[int, int, int]:
+    h = hex_color.strip().lstrip("#")
+    if len(h) != 6:
+        raise ValueError(f"Invalid hex color: {hex_color}")
+    return (int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16))
+
+
+def _validate_segmentation_palette(colors: Dict[str, str]) -> None:
+    keys = [k for k in colors.keys() if isinstance(colors.get(k), str)]
+    if len(keys) != len(set(keys)):
+        raise ValueError("SEGMENTATION_COLORS key 重复")
+
+    rgb_map: Dict[str, Tuple[int, int, int]] = {k: _hex_to_rgb(colors[k]) for k in keys}
+    min_rgb_dist = 60.0
+    min_hue_gap = 0.08
+    allowed_same = {frozenset({"floor_slab", "room_default"})}
+
+    for i in range(len(keys)):
+        for j in range(i + 1, len(keys)):
+            a = keys[i]
+            b = keys[j]
+            if frozenset({a, b}) in allowed_same:
+                continue
+            ra, ga, ba = rgb_map[a]
+            rb, gb, bb = rgb_map[b]
+            dist = math.sqrt((ra - rb) ** 2 + (ga - gb) ** 2 + (ba - bb) ** 2)
+            ha = colorsys.rgb_to_hsv(ra / 255.0, ga / 255.0, ba / 255.0)[0]
+            hb = colorsys.rgb_to_hsv(rb / 255.0, gb / 255.0, bb / 255.0)[0]
+            hue_gap = min(abs(ha - hb), 1.0 - abs(ha - hb))
+            if dist < min_rgb_dist and hue_gap < min_hue_gap:
+                raise ValueError(f"SEGMENTATION_COLORS 色差不足: {a} vs {b}")
+
+
 def _load_layout(path: Path) -> Dict[str, Any]:
     data = json.loads(path.read_text(encoding="utf-8"))
     if isinstance(data, dict) and "elements" in data:
@@ -402,6 +437,11 @@ def _render(layout: Dict[str, Any], out_path: Path, mode: str) -> None:
     ax.set_facecolor("#ffffff")
 
     if mode == "seg":
+        if out_path.suffix.lower() != ".png":
+            raise ValueError("seg 模式仅允许输出 PNG（无损）")
+        _validate_segmentation_palette(SEGMENTATION_COLORS if isinstance(SEGMENTATION_COLORS, dict) else {})
+        matplotlib.rcParams["lines.antialiased"] = False
+        matplotlib.rcParams["patch.antialiased"] = False
         ax.set_xlim(0.0, width)
         ax.set_ylim(0.0, height)
         fig.subplots_adjust(left=0.0, right=1.0, bottom=0.0, top=1.0)

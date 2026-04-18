@@ -42,6 +42,28 @@ from .room_spec import (
 logger = logging.getLogger(__name__)
 
 
+def estimate_corridor_area_upper(
+    floor_poly: Polygon,
+    cw: float,
+    corridor_layout: str,
+) -> float:
+    if cw <= 0:
+        return 0.0
+    minx, miny, maxx, maxy = floor_poly.bounds
+    w = float(maxx - minx)
+    h = float(maxy - miny)
+    if w <= 0 or h <= 0:
+        return 0.0
+    layout_l = (corridor_layout or "").lower()
+    if layout_l == "cross":
+        return max(0.0, cw * w + cw * h - cw * cw)
+    if layout_l == "h":
+        return max(0.0, cw * w + cw * h * 1.5)
+    if layout_l == "grid":
+        return max(0.0, cw * (w + h) * 2.0)
+    return max(0.0, cw * (w + h))
+
+
 # ============================================================
 # 旧版 RoomSpec（保持外部接口兼容）
 # ============================================================
@@ -717,31 +739,118 @@ def generate_layout_v2(
     config = config or SolverConfig()
     warnings: List[str] = []
 
-    # ========== Phase 1: 拓扑生成 ==========
-    try:
-        core_tube, corridors, islands = generate_rectangular_topology(
-            floor_boundary=floor_boundary,
-            corridor_width=corridor_width,
-            core_area_ratio=core_area_ratio,
-            corridor_layout=corridor_layout,
-            entrance_position=entrance_position,
-            core_tube_override=shared_core_tube,
+    def _total_target_area(specs: List[SemanticRoomSpec]) -> float:
+        return float(sum(max(0.0, float(s.target_area)) for s in specs))
+
+    def _apply_global_area_scale(specs: List[SemanticRoomSpec], scale: float) -> None:
+        for s in specs:
+            s.target_area = float(s.target_area) * float(scale)
+
+    corridor_width_initial = float(corridor_width)
+    min_cw = 1.2
+    cw_step = 0.2
+    max_iter = 5
+
+    total_target_room_area = _total_target_area(room_specs)
+    eps = 1e-6
+    while True:
+        a_total = float(floor_boundary.area)
+        a_core_est = max(0.0, a_total * float(core_area_ratio))
+        a_corr_est = estimate_corridor_area_upper(floor_boundary, float(corridor_width), corridor_layout)
+        a_island_est = max(eps, a_total - a_core_est - a_corr_est)
+        pressure_est = total_target_room_area / a_island_est
+        if pressure_est <= 1.0 or corridor_width <= min_cw + 1e-6:
+            break
+        corridor_width = max(min_cw, float(corridor_width) - cw_step)
+
+    acceptable = False
+    scaled = False
+    chosen_degradation = None
+    core_tube = None
+    corridors = None
+    islands = None
+    assignments = None
+    degradation = None
+
+    for _it in range(max_iter):
+        # ========== Phase 1: 拓扑生成 ==========
+        try:
+            core_tube, corridors, islands = generate_rectangular_topology(
+                floor_boundary=floor_boundary,
+                corridor_width=corridor_width,
+                core_area_ratio=core_area_ratio,
+                corridor_layout=corridor_layout,
+                entrance_position=entrance_position,
+                core_tube_override=shared_core_tube,
+            )
+        except Exception as e:
+            raise TopologyError(f"Failed to generate topology: {e}") from e
+
+        # ========== Phase 2: 房间-岛屿分配 ==========
+        assignments, degradation = assign_rooms_to_islands(
+            islands=islands,
+            rooms=room_specs,
+            adjacency_graph=adjacency_graph,
         )
-    except Exception as e:
-        raise TopologyError(f"Failed to generate topology: {e}") from e
+        chosen_degradation = degradation
+
+        total_island_area = float(sum(float(i.area) for i in islands)) if islands else 0.0
+        pressure = total_target_room_area / max(eps, total_island_area)
+        force_ratio = (len(degradation.force_shrunk) / max(1, len(room_specs))) if degradation else 0.0
+        acceptable = (pressure <= 0.92) and (not degradation.skipped_rooms) and (force_ratio <= 0.05)
+        if acceptable:
+            break
+        if corridor_width > min_cw + 1e-6:
+            corridor_width = max(min_cw, float(corridor_width) - cw_step)
+            continue
+        break
+
+    if not acceptable and float(corridor_width) <= min_cw + 1e-6:
+        if islands:
+            total_island_area = float(sum(float(i.area) for i in islands))
+        else:
+            total_island_area = 0.0
+        pressure = total_target_room_area / max(eps, total_island_area)
+        if pressure > 0.92 + 1e-6:
+            scale = min(0.92 / pressure, 0.95)
+            _apply_global_area_scale(room_specs, scale)
+            total_target_room_area = _total_target_area(room_specs)
+            scaled = True
+            try:
+                core_tube, corridors, islands = generate_rectangular_topology(
+                    floor_boundary=floor_boundary,
+                    corridor_width=corridor_width,
+                    core_area_ratio=core_area_ratio,
+                    corridor_layout=corridor_layout,
+                    entrance_position=entrance_position,
+                    core_tube_override=shared_core_tube,
+                )
+            except Exception as e:
+                raise TopologyError(f"Failed to generate topology: {e}") from e
+            assignments, degradation = assign_rooms_to_islands(
+                islands=islands,
+                rooms=room_specs,
+                adjacency_graph=adjacency_graph,
+            )
+            chosen_degradation = degradation
+
+    if abs(float(corridor_width) - corridor_width_initial) > 1e-6:
+        warnings.append(f"Corridor width auto-tuned: {corridor_width_initial:.2f}->{float(corridor_width):.2f}")
+    if scaled and chosen_degradation is not None:
+        warnings.append("Room target areas scaled to fit physical limit")
 
     if verbose:
         logger.info(
             "Topology: %d islands, %d corridors",
-            len(islands), len(corridors),
+            len(islands or []), len(corridors or []),
         )
 
-    # ========== Phase 2: 房间-岛屿分配 ==========
-    assignments, degradation = assign_rooms_to_islands(
-        islands=islands,
-        rooms=room_specs,
-        adjacency_graph=adjacency_graph,
-    )
+    if assignments is None or degradation is None:
+        assignments, degradation = assign_rooms_to_islands(
+            islands=islands or [],
+            rooms=room_specs,
+            adjacency_graph=adjacency_graph,
+        )
 
     # 收集降级 warnings
     if degradation.skipped_rooms:
@@ -763,7 +872,7 @@ def generate_layout_v2(
         for room in assignment.rooms:
             room_to_island[room.room_id] = island_id
 
-    islands_by_id = {i.id: i for i in islands}
+    islands_by_id = {i.id: i for i in (islands or [])}
     adj_warnings = _check_cross_island_adjacency(
         room_specs, room_to_island, islands_by_id,
     )
@@ -906,7 +1015,7 @@ def generate_layout_v2(
         else:
             minx, miny, maxx, maxy = core_tube.polygon.bounds
             rects["core_tube"] = (float(minx), float(miny), float(maxx - minx), float(maxy - miny))
-    for c in corridors:
+    for c in (corridors or []):
         if hasattr(c, "polygon") and c.polygon is not None and not c.polygon.is_empty:
             minx, miny, maxx, maxy = c.polygon.bounds
             rects[c.id] = (float(minx), float(miny), float(maxx - minx), float(maxy - miny))
@@ -925,8 +1034,8 @@ def generate_layout_v2(
 
     return LayoutResultV2(
         core_tube=core_tube,
-        corridors=corridors,
-        islands=islands,
+        corridors=list(corridors or []),
+        islands=list(islands or []),
         assignments=assignments,
         room_layouts=rooms,
         edge_set=edge_set,

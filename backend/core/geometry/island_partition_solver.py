@@ -42,6 +42,19 @@ from .room_spec import (
 logger = logging.getLogger(__name__)
 
 
+class SemanticSolveError(RuntimeError):
+    """语义求解错误，携带 CP-SAT 状态信息。"""
+
+    def __init__(self, message: str, status_code: Optional[int] = None, status_name: str = "UNKNOWN"):
+        super().__init__(message)
+        self.status_code = status_code
+        self.status_name = status_name
+
+    @property
+    def is_infeasible(self) -> bool:
+        return self.status_name.upper() == "INFEASIBLE"
+
+
 # ============================================================
 # 数据类型
 # ============================================================
@@ -779,17 +792,81 @@ class SemanticIslandPartitionSolver:
             results = self._clip_to_boundary(results)
             return results
 
-        # Stage 2: 语义 CP-SAT
-        try:
-            t1 = time.perf_counter()
-            results = self._solve_cpsat(warm_start)
-            logger.info(
-                "Semantic MIQP solve: %.1fms",
-                (time.perf_counter() - t1) * 1000,
-            )
-        except Exception as e:
+        # Stage 2: 语义 CP-SAT（受控重试：Strict -> Drop -> Relax）
+        attempts = [
+            {
+                "name": "strict",
+                "corridor_mode": "strict",
+                "area_tolerance": float(self.config.area_tolerance),
+                "aspect_relax_factor": 1.0,
+            },
+            {
+                "name": "drop_non_strong_corridor_access",
+                "corridor_mode": "strong_only",
+                "area_tolerance": float(self.config.area_tolerance),
+                "aspect_relax_factor": 1.0,
+            },
+            {
+                "name": "relax_area_and_aspect",
+                "corridor_mode": "strong_only",
+                "area_tolerance": max(float(self.config.area_tolerance), 0.20),
+                "aspect_relax_factor": 1.15,
+            },
+        ]
+
+        results: List[RoomResult] = []
+        solved = False
+        last_error: Optional[Exception] = None
+
+        for attempt in attempts:
+            try:
+                t1 = time.perf_counter()
+                results, dropped_rooms = self._solve_cpsat(
+                    warm_start,
+                    corridor_mode=str(attempt["corridor_mode"]),
+                    area_tolerance=float(attempt["area_tolerance"]),
+                    aspect_relax_factor=float(attempt["aspect_relax_factor"]),
+                )
+                elapsed_ms = (time.perf_counter() - t1) * 1000
+                logger.info(
+                    "Semantic MIQP solved in %.1fms (attempt=%s, area_tolerance=%.2f, aspect_relax=%.2f, dropped_corridor_access=%s)",
+                    elapsed_ms,
+                    attempt["name"],
+                    float(attempt["area_tolerance"]),
+                    float(attempt["aspect_relax_factor"]),
+                    dropped_rooms,
+                )
+                if attempt["name"] != "strict":
+                    logger.warning(
+                        "Solved with relaxed constraints: attempt=%s, dropped_corridor_access=%s, area_tolerance=%.2f, aspect_relax=%.2f",
+                        attempt["name"],
+                        dropped_rooms,
+                        float(attempt["area_tolerance"]),
+                        float(attempt["aspect_relax_factor"]),
+                    )
+                solved = True
+                break
+            except SemanticSolveError as e:
+                last_error = e
+                logger.warning(
+                    "Semantic MIQP attempt failed (attempt=%s, status=%s, reason=%s)",
+                    attempt["name"],
+                    e.status_name,
+                    e,
+                )
+                # 仅在不可行时继续软化；其他错误直接回退
+                if not e.is_infeasible:
+                    break
+                continue
+            except Exception as e:
+                last_error = e
+                logger.warning("Semantic MIQP attempt errored (attempt=%s, reason=%s)", attempt["name"], e)
+                break
+
+        if not solved:
             logger.warning(
-                "Semantic MIQP failed (%s), falling back to basic solver", e
+                "Semantic MIQP failed (%s), falling back to basic solver",
+                last_error or "unknown error",
             )
             results = self._fallback_solve()
 
@@ -828,7 +905,13 @@ class SemanticIslandPartitionSolver:
     # Stage 2: 语义 CP-SAT 求解
     # ----------------------------------------------------------
 
-    def _solve_cpsat(self, warm_start: List[WarmStartRect]) -> List[RoomResult]:
+    def _solve_cpsat(
+        self,
+        warm_start: List[WarmStartRect],
+        corridor_mode: str = "strict",
+        area_tolerance: Optional[float] = None,
+        aspect_relax_factor: float = 1.0,
+    ) -> Tuple[List[RoomResult], List[str]]:
         try:
             from ortools.sat.python import cp_model  # type: ignore[import-not-found]
         except ImportError:
@@ -925,7 +1008,7 @@ class SemanticIslandPartitionSolver:
         model.AddNoOverlap2D(x_intervals, y_intervals)
 
         # 约束 3: 面积容差
-        tol = self.config.area_tolerance
+        tol = float(self.config.area_tolerance if area_tolerance is None else area_tolerance)
         for i, room in enumerate(self.rooms):
             target_s = int(room.target_area * SCALE * SCALE)
             model.Add(area[i] >= int(target_s * (1 - tol)))
@@ -944,9 +1027,12 @@ class SemanticIslandPartitionSolver:
         # 约束 4: 宽高比
         for i, room in enumerate(self.rooms):
             ar_min, ar_max = room.aspect_ratio_range
+            relax = max(1.0, float(aspect_relax_factor))
+            ar_min_eff = max(0.2, float(ar_min) / relax)
+            ar_max_eff = float(ar_max) * relax
             # ar_min <= w/d <= ar_max  =>  ar_min * d <= w <= ar_max * d
-            ar_min_100 = int(ar_min * 100)
-            ar_max_100 = int(ar_max * 100)
+            ar_min_100 = int(ar_min_eff * 100)
+            ar_max_100 = int(ar_max_eff * 100)
             model.Add(w[i] * 100 >= ar_min_100 * d[i])
             model.Add(w[i] * 100 <= ar_max_100 * d[i])
 
@@ -996,10 +1082,25 @@ class SemanticIslandPartitionSolver:
         # ═══════════════════════════════════════════════════════════
         # 走廊可达性约束
         # ═══════════════════════════════════════════════════════════
+        dropped_corridor_access_rooms: List[str] = []
         if self.corridor_edges:
-            self._add_corridor_accessibility_constraints(
+            dropped_corridor_access_rooms = self._add_corridor_accessibility_constraints(
                 model, x, y, x_end, y_end, W_s, D_s,
+                mode=corridor_mode,
             )
+
+        logger.info(
+            "Semantic CP-SAT model summary: rooms=%d, needs_window=%d, needs_corridor_access=%d, corridor_mode=%s, dropped_corridor_access=%d, forbidden_zones=%d, area_tolerance=%.2f, aspect_relax=%.2f, corridor_edges=%s",
+            self.n,
+            sum(1 for r in self.rooms if r.needs_window),
+            sum(1 for r in self.rooms if getattr(r, "needs_corridor_access", True)),
+            corridor_mode,
+            len(dropped_corridor_access_rooms),
+            len(forbidden_zones),
+            tol,
+            float(aspect_relax_factor),
+            self.corridor_edges,
+        )
 
         # ═══════════════════════════════════════════════════════════
         # 目标函数
@@ -1063,9 +1164,14 @@ class SemanticIslandPartitionSolver:
         status = solver.Solve(model)
 
         if status not in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
-            raise RuntimeError(
-                f"Semantic MIQP solve failed, status: {status}. "
-                f"Try relaxing constraints or increasing time_limit."
+            status_name = solver.StatusName(status)
+            raise SemanticSolveError(
+                (
+                    f"Semantic MIQP solve failed, status: {status_name}. "
+                    f"Try relaxing constraints or increasing time_limit."
+                ),
+                status_code=int(status),
+                status_name=str(status_name),
             )
 
         # 提取结果
@@ -1079,7 +1185,7 @@ class SemanticIslandPartitionSolver:
                 depth=solver.Value(d[i]) / SCALE,
             ))
 
-        return results
+        return results, dropped_corridor_access_rooms
 
     # ----------------------------------------------------------
     # 约束辅助方法
@@ -1193,9 +1299,18 @@ class SemanticIslandPartitionSolver:
 
         model.Add(sep_L + sep_R + sep_F + sep_B >= 1)
 
+    def _is_strong_corridor_dependency(self, room: SemanticRoomSpec) -> bool:
+        """强依赖定义：交通空间或显式强邻接需求。"""
+        rtype = (room.room_type or "").lower()
+        if rtype in ("corridor", "hallway", "passage", "entrance", "lobby"):
+            return True
+        if room.zone == ZoneType.CIRCULATION:
+            return True
+        return len(room.adjacency_required) > 0
+
     def _add_corridor_accessibility_constraints(
-        self, model, x, y, x_end, y_end, W_s: int, D_s: int,
-    ):
+        self, model, x, y, x_end, y_end, W_s: int, D_s: int, mode: str = "strict",
+    ) -> List[str]:
         """
         走廊可达性约束：每个房间至少有一条边接触走廊侧
 
@@ -1206,11 +1321,20 @@ class SemanticIslandPartitionSolver:
                 "Island has no corridor edges, skipping accessibility constraint. "
                 "Rooms may not be directly accessible."
             )
-            return
+            return []
 
         TOUCH_THRESHOLD = 10  # 10cm = 可开门宽度（SCALE=100 时 10 个单位）
+        dropped_rooms: List[str] = []
 
         for i, room in enumerate(self.rooms):
+            needs_access = bool(getattr(room, "needs_corridor_access", True))
+            if not needs_access:
+                dropped_rooms.append(room.room_id)
+                continue
+            if mode == "strong_only" and (not self._is_strong_corridor_dependency(room)):
+                dropped_rooms.append(room.room_id)
+                continue
+
             touches_any_corridor = []
 
             if "south" in self.corridor_edges:
@@ -1240,6 +1364,7 @@ class SemanticIslandPartitionSolver:
             # 至少接触一个走廊边
             if touches_any_corridor:
                 model.Add(sum(touches_any_corridor) >= 1)
+        return dropped_rooms
 
     # ----------------------------------------------------------
     # 目标函数辅助方法
