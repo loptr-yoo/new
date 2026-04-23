@@ -511,6 +511,66 @@ class TestWallDoorWindowGeneration:
             assert len(door.connects) == 2
             assert door.width > 0
 
+    def test_staircase_elevator_hall_door_in_landing_bottom(self):
+        from shapely.geometry import LineString
+        from backend.core.geometry.postprocessor import WallSegment, generate_doors
+
+        staircase_id = "core_staircase"
+        hall_id = "core_elevator_hall"
+        walls = [
+            WallSegment(
+                type="partition_wall",
+                geometry=LineString([(10.0, 0.0), (10.0, 4.0)]),
+                thickness=0.12,
+                room_ids=[staircase_id, hall_id],
+            )
+        ]
+        zone_types = {staircase_id: "staircase", hall_id: "elevator_hall"}
+        zone_rects = {
+            staircase_id: (8.0, 0.0, 2.0, 5.0),
+            hall_id: (10.0, 0.0, 2.0, 2.0),
+        }
+
+        doors = generate_doors(walls, zone_types=zone_types, zone_rects=zone_rects)
+        sh = float(zone_rects[staircase_id][3])
+        landing_y0 = float(zone_rects[staircase_id][1])
+        landing_y1 = landing_y0 + 0.20 * sh
+        sd = [d for d in doors if set(d.connects) == {staircase_id, hall_id}]
+        assert len(sd) == 1
+        x, y = sd[0].position
+        assert abs(float(x) - 10.0) < 1e-6
+        assert landing_y0 - 1e-6 <= float(y) <= landing_y1 + 1e-6
+
+    def test_staircase_elevator_hall_door_in_landing_top(self):
+        from shapely.geometry import LineString
+        from backend.core.geometry.postprocessor import WallSegment, generate_doors
+
+        staircase_id = "core_staircase"
+        hall_id = "core_elevator_hall"
+        walls = [
+            WallSegment(
+                type="partition_wall",
+                geometry=LineString([(10.0, 0.0), (10.0, 5.0)]),
+                thickness=0.12,
+                room_ids=[staircase_id, hall_id],
+            )
+        ]
+        zone_types = {staircase_id: "staircase", hall_id: "elevator_hall"}
+        zone_rects = {
+            staircase_id: (8.0, 0.0, 2.0, 5.0),
+            hall_id: (10.0, 3.0, 2.0, 2.0),
+        }
+
+        doors = generate_doors(walls, zone_types=zone_types, zone_rects=zone_rects)
+        sh = float(zone_rects[staircase_id][3])
+        landing_y1 = float(zone_rects[staircase_id][1]) + sh
+        landing_y0 = landing_y1 - 0.20 * sh
+        sd = [d for d in doors if set(d.connects) == {staircase_id, hall_id}]
+        assert len(sd) == 1
+        x, y = sd[0].position
+        assert abs(float(x) - 10.0) < 1e-6
+        assert landing_y0 - 1e-6 <= float(y) <= landing_y1 + 1e-6
+
     def test_windows_on_exterior_walls(self):
         """在外墙上为 has_window=True 的房间放置窗"""
         from shapely.geometry import box

@@ -21,7 +21,6 @@ from shapely.geometry import (
     LinearRing,
     MultiLineString,
     MultiPolygon,
-    Point,
     Polygon,
     box,
 )
@@ -56,6 +55,8 @@ class DoorPlacement:
     connects: List[str]  # 连接的两个 room_id
     wall_type: str  # 所在墙的类型
     rotation: float = 0.0  # 0=水平墙, 90=垂直墙
+    thickness: float = 0.12  # 米
+    forward: Tuple[float, float, float] = (0.0, 0.0, 1.0)
 
 
 @dataclass
@@ -66,6 +67,8 @@ class WindowPlacement:
     room_id: str
     wall_length: float  # 所在墙段长度
     rotation: float = 0.0  # 0=水平墙, 90=垂直墙
+    thickness: float = 0.24  # 米
+    forward: Tuple[float, float, float] = (0.0, 0.0, 1.0)
 
 
 @dataclass
@@ -576,6 +579,13 @@ def _wall_rotation(wall: WallSegment) -> float:
     return 0.0 if dx >= dy else 90.0
 
 
+def _normalize_2d(dx: float, dy: float) -> Tuple[float, float]:
+    n = float((dx * dx + dy * dy) ** 0.5)
+    if n <= 1e-9:
+        return (0.0, 1.0)
+    return (dx / n, dy / n)
+
+
 # ============================================================
 # 门的放置
 # ============================================================
@@ -615,12 +625,170 @@ def generate_doors(
 
     margin = 0.2
 
+    def _zone_center(zid: str) -> Optional[Tuple[float, float]]:
+        if zone_rects is None:
+            return None
+        rect = zone_rects.get(zid)
+        if rect is None:
+            return None
+        x, y, w, h = rect
+        return (float(x + w / 2), float(y + h / 2))
+
+    def _default_forward(rotation: float) -> Tuple[float, float, float]:
+        if abs(float(rotation) - 90.0) < 1e-6:
+            return (1.0, 0.0, 0.0)
+        return (0.0, 0.0, 1.0)
+
+    def _door_forward(pos: Tuple[float, float], connects: List[str], rotation: float) -> Tuple[float, float, float]:
+        if zone_types is None or zone_rects is None or len(connects) != 2:
+            return _default_forward(rotation)
+        a, b = connects[0], connects[1]
+        ta = get_type(a)
+        tb = get_type(b)
+        from_id: Optional[str] = None
+        to_id: Optional[str] = None
+        if ta == "corridor" and tb != "corridor":
+            from_id, to_id = a, b
+        elif tb == "corridor" and ta != "corridor":
+            from_id, to_id = b, a
+        elif ta == "core" and tb != "core":
+            from_id, to_id = a, b
+        elif tb == "core" and ta != "core":
+            from_id, to_id = b, a
+        else:
+            s = sorted([a, b])
+            from_id, to_id = s[0], s[1]
+        c_from = _zone_center(from_id) if from_id else None
+        c_to = _zone_center(to_id) if to_id else None
+        if c_from is None or c_to is None:
+            return _default_forward(rotation)
+        dx, dy = _normalize_2d(float(c_to[0]) - float(c_from[0]), float(c_to[1]) - float(c_from[1]))
+        return (float(dx), 0.0, float(dy))
+
     def _door_point(wall: WallSegment) -> Optional[Tuple[float, float]]:
         if wall.length < (door_width + 2 * margin):
             return None
         x0, y0 = wall.geometry.coords[0]
         x1, y1 = wall.geometry.coords[1]
         return ((x0 + x1) / 2, (y0 + y1) / 2)
+
+    def _door_point_staircase_elevator_hall(
+        wall: WallSegment,
+        staircase_zid: str,
+        elevator_hall_zid: str,
+    ) -> Optional[Tuple[Tuple[float, float], float]]:
+        if zone_rects is None:
+            p = _door_point(wall)
+            return (p, float(door_width)) if p is not None else None
+        stair = zone_rects.get(staircase_zid)
+        hall = zone_rects.get(elevator_hall_zid)
+        if stair is None or hall is None:
+            p = _door_point(wall)
+            return (p, float(door_width)) if p is not None else None
+        sx, sy, sw, sh = stair
+        hx, hy, hw, hh = hall
+
+        rot = _wall_rotation(wall)
+        x0, y0 = wall.geometry.coords[0]
+        x1, y1 = wall.geometry.coords[1]
+
+        stair_minx = float(sx)
+        stair_miny = float(sy)
+        stair_maxx = float(sx + sw)
+        stair_maxy = float(sy + sh)
+
+        stair_cx = float(sx + sw / 2)
+        stair_cy = float(sy + sh / 2)
+        hall_cx = float(hx + hw / 2)
+        hall_cy = float(hy + hh / 2)
+        dx = float(hall_cx) - stair_cx
+        dy = float(hall_cy) - stair_cy
+        axis = "y" if float(sh) >= float(sw) else "x"
+        side = "max" if ((dy > 0) if axis == "y" else (dx > 0)) else "min"
+
+        landing_min_ratio = 0.20
+        landing_max_ratio = 0.30
+        landing_x0 = stair_minx
+        landing_x1 = stair_maxx
+        landing_y0 = stair_miny
+        landing_y1 = stair_maxy
+        if axis == "x":
+            w = stair_maxx - stair_minx
+            target_len = float(door_width)
+            lw = max(w * landing_min_ratio, min(w * landing_max_ratio, target_len))
+            if side == "min":
+                landing_x0, landing_x1 = (stair_minx, stair_minx + lw)
+            else:
+                landing_x0, landing_x1 = (stair_maxx - lw, stair_maxx)
+        else:
+            h = stair_maxy - stair_miny
+            target_len = float(door_width)
+            lh = max(h * landing_min_ratio, min(h * landing_max_ratio, target_len))
+            if side == "min":
+                landing_y0, landing_y1 = (stair_miny, stair_miny + lh)
+            else:
+                landing_y0, landing_y1 = (stair_maxy - lh, stair_maxy)
+
+        half = float(door_width) / 2
+
+        if abs(float(rot) - 90.0) < 1e-6:
+            y_line0 = float(min(y0, y1))
+            y_line1 = float(max(y0, y1))
+            y_hall0 = float(hy)
+            y_hall1 = float(hy + hh)
+            seg0 = max(y_line0, y_hall0)
+            seg1 = min(y_line1, y_hall1)
+            if seg1 <= seg0:
+                seg0, seg1 = (y_line0, y_line1)
+            x_const = float(x0)
+            if axis == "y":
+                seg0 = max(seg0, landing_y0)
+                seg1 = min(seg1, landing_y1)
+            else:
+                if not (landing_x0 - 1e-6 <= x_const <= landing_x1 + 1e-6):
+                    p = _door_point(wall)
+                    return (p, float(door_width)) if p is not None else None
+            if seg1 <= seg0:
+                p = _door_point(wall)
+                return (p, float(door_width)) if p is not None else None
+            avail = float(seg1 - seg0)
+            door_w = float(min(float(door_width), avail))
+            lo = float(seg0) + door_w / 2
+            hi = float(seg1) - door_w / 2
+            if hi < lo:
+                p = _door_point(wall)
+                return (p, float(door_width)) if p is not None else None
+            y = lo if side == "min" else hi
+            return ((x_const, float(y)), door_w)
+
+        x_line0 = float(min(x0, x1))
+        x_line1 = float(max(x0, x1))
+        x_hall0 = float(hx)
+        x_hall1 = float(hx + hw)
+        seg0 = max(x_line0, x_hall0)
+        seg1 = min(x_line1, x_hall1)
+        if seg1 <= seg0:
+            seg0, seg1 = (x_line0, x_line1)
+        y_const = float(y0)
+        if axis == "x":
+            seg0 = max(seg0, landing_x0)
+            seg1 = min(seg1, landing_x1)
+        else:
+            if not (landing_y0 - 1e-6 <= y_const <= landing_y1 + 1e-6):
+                p = _door_point(wall)
+                return (p, float(door_width)) if p is not None else None
+        if seg1 <= seg0:
+            p = _door_point(wall)
+            return (p, float(door_width)) if p is not None else None
+        avail = float(seg1 - seg0)
+        door_w = float(min(float(door_width), avail))
+        lo = float(seg0) + door_w / 2
+        hi = float(seg1) - door_w / 2
+        if hi < lo:
+            p = _door_point(wall)
+            return (p, float(door_width)) if p is not None else None
+        x = lo if side == "min" else hi
+        return ((float(x), y_const), door_w)
 
     def _wall_key(w: WallSegment) -> Tuple:
         coords = list(w.geometry.coords)
@@ -682,12 +850,16 @@ def generate_doors(
             if key in used:
                 continue
             used.add(key)
+            rot = _wall_rotation(wall)
+            connects = list(wall.room_ids)
             doors.append(DoorPlacement(
                 position=(round(p[0], 2), round(p[1], 2)),
                 width=door_width,
-                connects=list(wall.room_ids),
+                connects=connects,
                 wall_type=wall.type,
-                rotation=_wall_rotation(wall),
+                rotation=rot,
+                thickness=float(wall.thickness),
+                forward=_door_forward(p, connects, rot),
             ))
         return doors
 
@@ -714,20 +886,35 @@ def generate_doors(
             chosen = max(other_candidates, key=lambda w: w.length)
         if chosen is None:
             continue
-
-        p = _door_point(chosen)
+        a, b = chosen.room_ids[0], chosen.room_ids[1]
+        ta = get_type(a)
+        tb = get_type(b)
+        p = None
+        w_override: Optional[float] = None
+        if (ta == "staircase" and tb == "elevator_hall") or (ta == "elevator_hall" and tb == "staircase"):
+            stair_id = a if ta == "staircase" else b
+            hall_id = a if ta == "elevator_hall" else b
+            pack = _door_point_staircase_elevator_hall(chosen, stair_id, hall_id)
+            if pack is not None:
+                p, w_override = pack
+        else:
+            p = _door_point(chosen)
         if p is None:
             continue
         key = _wall_key(chosen)
         if key in used:
             continue
         used.add(key)
+        rot = _wall_rotation(chosen)
+        connects = list(chosen.room_ids)
         doors.append(DoorPlacement(
             position=(round(p[0], 2), round(p[1], 2)),
-            width=door_width,
-            connects=list(chosen.room_ids),
+            width=float(w_override) if w_override is not None else door_width,
+            connects=connects,
             wall_type=chosen.type,
-            rotation=_wall_rotation(chosen),
+            rotation=rot,
+            thickness=float(chosen.thickness),
+            forward=_door_forward(p, connects, rot),
         ))
 
     core_candidates = []
@@ -744,12 +931,16 @@ def generate_doors(
             key = _wall_key(chosen)
             if key not in used:
                 used.add(key)
+                rot = _wall_rotation(chosen)
+                connects = list(chosen.room_ids)
                 doors.append(DoorPlacement(
                     position=(round(p[0], 2), round(p[1], 2)),
                     width=door_width,
-                    connects=list(chosen.room_ids),
+                    connects=connects,
                     wall_type=chosen.type,
-                    rotation=_wall_rotation(chosen),
+                    rotation=rot,
+                    thickness=float(chosen.thickness),
+                    forward=_door_forward(p, connects, rot),
                 ))
 
     staircase_id = None
@@ -768,17 +959,22 @@ def generate_doors(
                 forced.append(w)
         if forced:
             chosen = max(forced, key=lambda w: w.length)
-            p = _door_point(chosen)
-            if p is not None:
+            pack = _door_point_staircase_elevator_hall(chosen, staircase_id, elevator_hall_id)
+            if pack is not None:
+                p, w_override = pack
                 key = _wall_key(chosen)
                 if key not in used:
                     used.add(key)
+                    rot = _wall_rotation(chosen)
+                    connects = list(chosen.room_ids)
                     doors.append(DoorPlacement(
                         position=(round(p[0], 2), round(p[1], 2)),
-                        width=door_width,
-                        connects=list(chosen.room_ids),
+                        width=float(w_override) if w_override is not None else door_width,
+                        connects=connects,
                         wall_type=chosen.type,
-                        rotation=_wall_rotation(chosen),
+                        rotation=rot,
+                        thickness=float(chosen.thickness),
+                        forward=_door_forward(p, connects, rot),
                     ))
 
     return doors
@@ -817,6 +1013,15 @@ def generate_windows(
             window_rooms.add(room_id)
 
     windows: List[WindowPlacement] = []
+    room_center: Dict[str, Tuple[float, float]] = {}
+    for r in rooms:
+        rid = getattr(r, "id", getattr(r, "room_id", "?"))
+        try:
+            if hasattr(r, "polygon") and r.polygon is not None and (not r.polygon.is_empty):
+                c = r.polygon.centroid
+                room_center[rid] = (float(c.x), float(c.y))
+        except Exception:
+            continue
 
     for wall in walls:
         if wall.type != "exterior_wall":
@@ -882,12 +1087,19 @@ def generate_windows_from_exterior_walls(
             t = (k + 0.5) / num_windows
             wx = x0 + t * (x1 - x0)
             wy = y0 + t * (y1 - y0)
+            rot = _wall_rotation(wall)
+            if abs(float(rot) - 90.0) < 1e-6:
+                fx, fy = (1.0, 0.0)
+            else:
+                fx, fy = (0.0, 1.0)
             windows.append(WindowPlacement(
                 position=(round(wx, 2), round(wy, 2)),
                 width=window_width,
                 room_id=room_id,
                 wall_length=round(wall_len, 2),
-                rotation=_wall_rotation(wall),
+                rotation=rot,
+                thickness=float(wall.thickness),
+                forward=(float(fx), 0.0, float(fy)),
             ))
 
     return windows
@@ -943,12 +1155,17 @@ def generate_windows_from_floor_boundary(
             for k in range(num):
                 t = (k + 0.5) / num
                 wy = y0 + t * (y1 - y0)
+                cx = float(rx + rw / 2)
+                cy = float(ry + rh / 2)
+                fx, fy = _normalize_2d(float(cx) - float(x), float(cy) - float(wy))
                 windows.append(WindowPlacement(
                     position=(round(float(x), 2), round(float(wy), 2)),
                     width=window_width,
                     room_id=rid,
                     wall_length=round(float(wall_len), 2),
                     rotation=90.0,
+                    thickness=float(exterior_thickness),
+                    forward=(float(fx), 0.0, float(fy)),
                 ))
         else:
             y = (fminy + t / 2) if side == "bottom" else (fmaxy - t / 2)
@@ -961,12 +1178,17 @@ def generate_windows_from_floor_boundary(
             for k in range(num):
                 t = (k + 0.5) / num
                 wx = x0 + t * (x1 - x0)
+                cx = float(rx + rw / 2)
+                cy = float(ry + rh / 2)
+                fx, fy = _normalize_2d(float(cx) - float(wx), float(cy) - float(y))
                 windows.append(WindowPlacement(
                     position=(round(float(wx), 2), round(float(y), 2)),
                     width=window_width,
                     room_id=rid,
                     wall_length=round(float(wall_len), 2),
                     rotation=0.0,
+                    thickness=float(exterior_thickness),
+                    forward=(float(fx), 0.0, float(fy)),
                 ))
 
     return windows
@@ -1076,6 +1298,9 @@ def door_to_dict(door: DoorPlacement) -> dict:
         "width": door.width,
         "connects": door.connects,
         "rotation": door.rotation,
+        "wall_type": door.wall_type,
+        "thickness": door.thickness,
+        "forward": list(door.forward),
     }
 
 
@@ -1086,4 +1311,6 @@ def window_to_dict(window: WindowPlacement) -> dict:
         "width": window.width,
         "room_id": window.room_id,
         "rotation": window.rotation,
+        "thickness": window.thickness,
+        "forward": list(window.forward),
     }

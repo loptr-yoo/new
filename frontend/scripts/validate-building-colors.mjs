@@ -2,6 +2,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 
+/* global process */
+
 const ROOT = path.resolve(process.cwd());
 const SCHEME_JSON = path.join(ROOT, 'src', 'theme', 'buildingColorScheme.json');
 const VARS_CSS = path.join(ROOT, 'src', 'theme', 'building-vars.css');

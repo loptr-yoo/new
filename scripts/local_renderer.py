@@ -176,13 +176,216 @@ def _seg_facecolor(elem: Dict[str, Any]) -> str:
     return "#FF00FF"
 
 
-def _draw_polygon_seg(ax: Any, elem: Dict[str, Any]) -> None:
+def _elem_bounds_center(elem: Dict[str, Any]) -> Optional[Tuple[float, float]]:
+    poly = elem.get("polygon")
+    if isinstance(poly, list) and len(poly) >= 3:
+        xs: List[float] = []
+        ys: List[float] = []
+        for p in poly:
+            if not (isinstance(p, (list, tuple)) and len(p) >= 2):
+                continue
+            if p[0] is None or p[1] is None:
+                continue
+            try:
+                xs.append(float(p[0]))
+                ys.append(float(p[1]))
+            except Exception:
+                continue
+        if xs and ys:
+            return ((min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2)
+    if all(k in elem for k in ("x", "y", "width", "height")):
+        try:
+            x_raw = elem.get("x")
+            y_raw = elem.get("y")
+            w_raw = elem.get("width")
+            h_raw = elem.get("height")
+            if x_raw is None or y_raw is None or w_raw is None or h_raw is None:
+                return None
+            x = float(x_raw)
+            y = float(y_raw)
+            w = float(w_raw)
+            h = float(h_raw)
+            anchor = _rect_anchor_mode(elem)
+            if anchor == "center":
+                return (x, y)
+            return (x + w / 2, y + h / 2)
+        except Exception:
+            return None
+    return None
+
+
+def _draw_polygon_seg(ax: Any, elem: Dict[str, Any], elements: List[Dict[str, Any]]) -> None:
+    t = str(elem.get("type") or "")
     poly = elem.get("polygon") or []
     if not isinstance(poly, list) or len(poly) < 3:
         return
     poly = _close_polygon(poly)
     points: List[List[float]] = [[float(x), float(y)] for x, y in poly]
     z = _zorder(elem)
+    if t == "staircase":
+        xs = [p[0] for p in points]
+        ys = [p[1] for p in points]
+        minx, maxx = float(min(xs)), float(max(xs))
+        miny, maxy = float(min(ys)), float(max(ys))
+        w = maxx - minx
+        h = maxy - miny
+
+        if w > 1e-6 and h > 1e-6:
+            stair_cx = (minx + maxx) / 2
+            stair_cy = (miny + maxy) / 2
+
+            target_center: Optional[Tuple[float, float]] = None
+            best_d2: Optional[float] = None
+            preferred_types = {"elevator_hall", "elevator_lobby"}
+            fallback_types = {"corridor"}
+            for pass_types in (preferred_types, fallback_types):
+                for other in elements:
+                    ot = str(other.get("type") or "")
+                    if ot not in pass_types:
+                        continue
+                    c = _elem_bounds_center(other)
+                    if c is None:
+                        continue
+                    dx = float(c[0]) - stair_cx
+                    dy = float(c[1]) - stair_cy
+                    d2 = dx * dx + dy * dy
+                    if best_d2 is None or d2 < best_d2:
+                        best_d2 = d2
+                        target_center = c
+                if target_center is not None:
+                    break
+
+            dx = 0.0
+            dy = -1.0
+            if target_center is not None:
+                dx = float(target_center[0]) - stair_cx
+                dy = float(target_center[1]) - stair_cy
+
+            door_len: Optional[float] = None
+            for other in elements:
+                if str(other.get("type") or "") != "door":
+                    continue
+                con = other.get("connects")
+                if not (isinstance(con, list) and len(con) == 2):
+                    continue
+                if not (any("stair" in str(x) for x in con) and any("elevator" in str(x) for x in con)):
+                    continue
+                try:
+                    door_len = max(float(other.get("width") or 0.0), float(other.get("height") or 0.0))
+                except Exception:
+                    door_len = None
+                break
+
+            landing_min_ratio = 0.20
+            landing_max_ratio = 0.30
+            axis = "y" if h >= w else "x"
+            side = "max" if ((dy > 0) if axis == "y" else (dx > 0)) else "min"
+
+            stair_face = _seg_facecolor(elem)
+            blank_face = str(SEGMENTATION_COLORS.get("floor_slab", "#EEEEEE")) if isinstance(SEGMENTATION_COLORS, dict) else "#EEEEEE"
+
+            if axis == "y":
+                axis_len = h
+                target_len = float(door_len) if door_len is not None else (axis_len * landing_min_ratio)
+                lh = max(axis_len * landing_min_ratio, min(axis_len * landing_max_ratio, target_len))
+                if side == "min":
+                    ax.add_patch(patches.Rectangle(
+                        (minx, miny),
+                        w,
+                        lh,
+                        facecolor=blank_face,
+                        edgecolor="none",
+                        linewidth=0,
+                        antialiased=False,
+                        alpha=1.0,
+                        zorder=z,
+                    ))
+                    ax.add_patch(patches.Rectangle(
+                        (minx, miny + lh),
+                        w,
+                        h - lh,
+                        facecolor=stair_face,
+                        edgecolor="none",
+                        linewidth=0,
+                        antialiased=False,
+                        alpha=1.0,
+                        zorder=z,
+                    ))
+                else:
+                    ax.add_patch(patches.Rectangle(
+                        (minx, maxy - lh),
+                        w,
+                        lh,
+                        facecolor=blank_face,
+                        edgecolor="none",
+                        linewidth=0,
+                        antialiased=False,
+                        alpha=1.0,
+                        zorder=z,
+                    ))
+                    ax.add_patch(patches.Rectangle(
+                        (minx, miny),
+                        w,
+                        h - lh,
+                        facecolor=stair_face,
+                        edgecolor="none",
+                        linewidth=0,
+                        antialiased=False,
+                        alpha=1.0,
+                        zorder=z,
+                    ))
+            else:
+                axis_len = w
+                target_len = float(door_len) if door_len is not None else (axis_len * landing_min_ratio)
+                lw = max(axis_len * landing_min_ratio, min(axis_len * landing_max_ratio, target_len))
+                if side == "min":
+                    ax.add_patch(patches.Rectangle(
+                        (minx, miny),
+                        lw,
+                        h,
+                        facecolor=blank_face,
+                        edgecolor="none",
+                        linewidth=0,
+                        antialiased=False,
+                        alpha=1.0,
+                        zorder=z,
+                    ))
+                    ax.add_patch(patches.Rectangle(
+                        (minx + lw, miny),
+                        w - lw,
+                        h,
+                        facecolor=stair_face,
+                        edgecolor="none",
+                        linewidth=0,
+                        antialiased=False,
+                        alpha=1.0,
+                        zorder=z,
+                    ))
+                else:
+                    ax.add_patch(patches.Rectangle(
+                        (maxx - lw, miny),
+                        lw,
+                        h,
+                        facecolor=blank_face,
+                        edgecolor="none",
+                        linewidth=0,
+                        antialiased=False,
+                        alpha=1.0,
+                        zorder=z,
+                    ))
+                    ax.add_patch(patches.Rectangle(
+                        (minx, miny),
+                        w - lw,
+                        h,
+                        facecolor=stair_face,
+                        edgecolor="none",
+                        linewidth=0,
+                        antialiased=False,
+                        alpha=1.0,
+                        zorder=z,
+                    ))
+            return
+
     face = _seg_facecolor(elem)
     patch = patches.Polygon(
         cast(Any, points),
@@ -469,7 +672,7 @@ def _render(layout: Dict[str, Any], out_path: Path, mode: str) -> None:
         poly = elem.get("polygon")
         if isinstance(poly, list) and len(poly) >= 3:
             if mode == "seg":
-                _draw_polygon_seg(ax, elem)
+                _draw_polygon_seg(ax, elem, elements)
             else:
                 _draw_polygon(ax, elem)
             continue

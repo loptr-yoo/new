@@ -388,33 +388,45 @@ export function convertV2ToBuildingData(v2: BuildingDataV2): BuildingData {
       }
     }
 
-    // Layer 6: 门窗（最顶层）— 响应式视觉厚度
+    // Layer 6: 门窗（最顶层）— 厚度与墙体对齐（避免 door thickness 超出墙体边界）
     const floorMinDim = Math.min(v2.building.width, v2.building.depth);
     const VISUAL_THICKNESS = Math.max(0.3, floorMinDim * 0.025);
+    const EXTERIOR_THICKNESS =
+      (floorData.walls || []).find(w => w.type === 'exterior_wall')?.thickness ?? 0.24;
+    const PARTITION_THICKNESS = Math.max(
+      0.12,
+      ...(floorData.walls || [])
+        .filter(w => w.type === 'partition_wall' && (w.room_ids?.length ?? 0) >= 2)
+        .map(w => w.thickness ?? 0.12)
+    );
 
     for (const door of (floorData.doors || [])) {
       const isVertical = (door.rotation ?? 0) === 90;
-      const halfT = VISUAL_THICKNESS / 2;
+      const doorDepth = door.thickness ?? Math.min(VISUAL_THICKNESS, EXTERIOR_THICKNESS, PARTITION_THICKNESS);
+      const halfT = doorDepth / 2;
       elements.push({
         id: `${floorId}_door_${elements.length}`,
         type: 'door',
         x: isVertical ? door.position[0] - halfT : door.position[0] - door.width / 2,
         y: isVertical ? door.position[1] - door.width / 2 : door.position[1] - halfT,
-        width:  isVertical ? VISUAL_THICKNESS : door.width,
-        height: isVertical ? door.width : VISUAL_THICKNESS,
+        width:  isVertical ? doorDepth : door.width,
+        height: isVertical ? door.width : doorDepth,
+        forward: door.forward,
       });
     }
 
     for (const win of (floorData.windows || [])) {
       const isVertical = (win.rotation ?? 0) === 90;
-      const halfT = VISUAL_THICKNESS / 2;
+      const windowDepth = Math.min(VISUAL_THICKNESS, EXTERIOR_THICKNESS);
+      const halfT = windowDepth / 2;
       elements.push({
         id: `${floorId}_window_${elements.length}`,
         type: 'window',
         x: isVertical ? win.position[0] - halfT : win.position[0] - win.width / 2,
         y: isVertical ? win.position[1] - win.width / 2 : win.position[1] - halfT,
-        width:  isVertical ? VISUAL_THICKNESS : win.width,
-        height: isVertical ? win.width : VISUAL_THICKNESS,
+        width:  isVertical ? windowDepth : win.width,
+        height: isVertical ? win.width : windowDepth,
+        forward: win.forward,
       });
     }
 

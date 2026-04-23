@@ -190,6 +190,8 @@ export interface DoorV2 {
   width: number;
   connects: string[];
   rotation?: number;               // 0=水平, 90=垂直
+  thickness?: number;
+  forward?: [number, number, number];
 }
 
 export interface WindowV2 {
@@ -197,6 +199,8 @@ export interface WindowV2 {
   width: number;
   room_id: string;
   rotation?: number;
+  thickness?: number;
+  forward?: [number, number, number];
 }
 
 export interface DegradationSummary {

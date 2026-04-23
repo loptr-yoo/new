@@ -5,6 +5,7 @@ import asyncio
 import importlib.util
 import json
 import logging
+import math
 import random
 import sys
 import time
@@ -281,6 +282,7 @@ def _flatten_floor_to_elements(
     floor_min_dim = min(float(building_dict["building"]["width"]), float(building_dict["building"]["depth"]))
     visual_thickness = max(0.3, floor_min_dim * 0.025)
     exterior_thickness = 0.24
+    partition_thickness = 0.12
     for w in floor_data.get("walls", []) or []:
         if (w.get("type") or "") == "exterior_wall" and w.get("thickness") is not None:
             try:
@@ -288,14 +290,40 @@ def _flatten_floor_to_elements(
                 break
             except Exception:
                 pass
+    try:
+        partition_candidates: List[float] = []
+        for w in floor_data.get("walls", []) or []:
+            if (w.get("type") or "") != "partition_wall":
+                continue
+            t = w.get("thickness")
+            if t is None:
+                continue
+            room_ids = w.get("room_ids") or []
+            if isinstance(room_ids, list) and len(room_ids) < 2:
+                continue
+            try:
+                partition_candidates.append(float(t))
+            except Exception:
+                continue
+        if partition_candidates:
+            partition_thickness = max(partition_candidates)
+    except Exception:
+        pass
 
     for d in floor_data.get("doors", []) or []:
         rotation = float(d.get("rotation") or 0.0)
         is_vertical = abs(rotation - 90.0) < 1e-6
         w = float(d.get("width") or 0.9)
-        rect_w = float(visual_thickness if is_vertical else w)
-        rect_h = float(w if is_vertical else visual_thickness)
+        door_depth = float(d.get("thickness") or min(visual_thickness, partition_thickness, exterior_thickness))
+        rect_w = float(door_depth if is_vertical else w)
+        rect_h = float(w if is_vertical else door_depth)
         px, py = d.get("position", [0.0, 0.0])
+        fwd = d.get("forward")
+        forward = (
+            [float(fwd[0]), float(fwd[1]), float(fwd[2])]
+            if isinstance(fwd, (list, tuple)) and len(fwd) == 3
+            else None
+        )
         elements.append({
             "id": f"{floor_id}_door_{len(elements)}",
             "type": "door",
@@ -308,6 +336,8 @@ def _flatten_floor_to_elements(
             "swing_dir": "left",
             "connects": d.get("connects"),
             "anchor": "center",
+            "forward": forward,
+            "thickness": float(d.get("thickness") or door_depth),
             "zOrder": _zorder_for("door"),
         })
 
@@ -319,6 +349,12 @@ def _flatten_floor_to_elements(
         rect_w = float(window_depth if is_vertical else w)
         rect_h = float(w if is_vertical else window_depth)
         px, py = wv.get("position", [0.0, 0.0])
+        fwd = wv.get("forward")
+        forward = (
+            [float(fwd[0]), float(fwd[1]), float(fwd[2])]
+            if isinstance(fwd, (list, tuple)) and len(fwd) == 3
+            else None
+        )
         elements.append({
             "id": f"{floor_id}_window_{len(elements)}",
             "type": "window",
@@ -329,6 +365,8 @@ def _flatten_floor_to_elements(
             "rotation": 0.0,
             "room_id": wv.get("room_id"),
             "anchor": "center",
+            "forward": forward,
+            "thickness": float(wv.get("thickness") or window_depth),
             "zOrder": _zorder_for("window"),
         })
 
@@ -667,6 +705,10 @@ def _furniture_elements(
         if spec is None:
             continue
         category_value = spec.category.value if hasattr(spec.category, 'value') else spec.category
+        rot = float(it.rotation)
+        rad = math.radians(rot % 360.0)
+        fx = float(math.cos(rad))
+        fz = float(math.sin(rad))
         out.append({
             "id": f"{floor_id}_{room_id}_{it.furniture_id}",
             "type": "furniture",
@@ -676,8 +718,9 @@ def _furniture_elements(
             "y": float(it.cy),
             "width": float(spec.width),
             "height": float(spec.height),
-            "rotation": float(it.rotation),
+            "rotation": rot,
             "anchor": "center",
+            "forward": [fx, 0.0, fz],
             "zOrder": 60,
         })
     return out

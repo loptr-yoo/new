@@ -273,13 +273,34 @@ def _flatten_floor_to_elements(
                 break
             except Exception:
                 pass
+    partition_thickness = 0.12
+    try:
+        partition_candidates: List[float] = []
+        for w in floor_data.get("walls", []) or []:
+            if (w.get("type") or "") != "partition_wall":
+                continue
+            t = w.get("thickness")
+            if t is None:
+                continue
+            room_ids = w.get("room_ids") or []
+            if isinstance(room_ids, list) and len(room_ids) < 2:
+                continue
+            try:
+                partition_candidates.append(float(t))
+            except Exception:
+                continue
+        if partition_candidates:
+            partition_thickness = max(partition_candidates)
+    except Exception:
+        pass
 
     for d in floor_data.get("doors", []) or []:
         rotation = float(d.get("rotation") or 0.0)
         is_vertical = abs(rotation - 90.0) < 1e-6
         w = float(d.get("width") or 0.9)
-        rect_w = float(visual_thickness if is_vertical else w)
-        rect_h = float(w if is_vertical else visual_thickness)
+        door_depth = float(d.get("thickness") or min(visual_thickness, partition_thickness, exterior_thickness))
+        rect_w = float(door_depth if is_vertical else w)
+        rect_h = float(w if is_vertical else door_depth)
         px, py = d.get("position", [0.0, 0.0])
         elements.append({
             "id": f"{floor_id}_door_{len(elements)}",
@@ -293,6 +314,8 @@ def _flatten_floor_to_elements(
             "swing_dir": "left",
             "connects": d.get("connects"),
             "anchor": "center",
+            "forward": d.get("forward"),
+            "thickness": float(d.get("thickness") or door_depth),
             "zOrder": _zorder_for("door"),
         })
 
@@ -314,6 +337,8 @@ def _flatten_floor_to_elements(
             "rotation": 0.0,
             "room_id": wv.get("room_id"),
             "anchor": "center",
+            "forward": wv.get("forward"),
+            "thickness": float(wv.get("thickness") or window_depth),
             "zOrder": _zorder_for("window"),
         })
 
