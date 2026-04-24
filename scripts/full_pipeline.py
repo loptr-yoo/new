@@ -12,7 +12,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from dotenv import load_dotenv
 from shapely.geometry import MultiPolygon, Point, Polygon
@@ -72,7 +72,9 @@ def _is_room_type(t: str) -> bool:
         "elevator",
         "elevator_hall",
         "elevator_shaft",
-        "staircase",
+        "elevator_hall",
+        "staircase_hall",
+        "staircase_shaft",
         "partition_wall",
         "exterior_wall",
         "wall",
@@ -110,6 +112,29 @@ def _bounds_from_polygon(poly: Sequence[Sequence[float]]) -> Optional[Tuple[floa
     xs = [float(p[0]) for p in poly]
     ys = [float(p[1]) for p in poly]
     return (min(xs), min(ys), max(xs), max(ys))
+
+
+def _stretch_rect_polygon_to_ymax(
+    poly: Sequence[Sequence[float]],
+    target_ymax: float,
+    atol: float = 1e-6,
+) -> List[List[float]]:
+    b = _bounds_from_polygon(poly)
+    if b is None:
+        return [list(map(float, p[:2])) for p in poly]  # type: ignore[index]
+    _, _, _, ymax = b
+    if target_ymax <= float(ymax) + atol:
+        return [list(map(float, p[:2])) for p in poly]  # type: ignore[index]
+    out: List[List[float]] = []
+    for p in poly:
+        x = float(p[0])
+        y = float(p[1])
+        if abs(y - float(ymax)) <= 1e-4:
+            y = float(target_ymax)
+        out.append([x, y])
+    if out and out[0] != out[-1]:
+        out.append([out[0][0], out[0][1]])
+    return out
 
 
 def _derive_floor_boundary_from_allocation(allocation: Any) -> Tuple[float, float, Any]:
@@ -156,6 +181,8 @@ def _zorder_for(elem_type: str) -> int:
         "elevator_hall": 30,
         "elevator_shaft": 30,
         "staircase": 30,
+        "staircase_hall": 30,
+        "staircase_shaft": 30,
         "partition_wall": 80,
         "exterior_wall": 80,
         "wall": 80,
@@ -231,22 +258,53 @@ def _flatten_floor_to_elements(
             "zOrder": _zorder_for(room_type),
         })
 
+    exterior_t: Optional[float] = None
+    for w in floor_data.get("walls", []) or []:
+        if (w.get("type") or "") != "exterior_wall":
+            continue
+        th = w.get("thickness")
+        if isinstance(th, (int, float)):
+            exterior_t = float(th)
+            break
+    inner_ymax = (float(floor_boundary_height) - float(exterior_t)) if exterior_t is not None else None
+
     core = building_dict.get("core_tube") or {}
     if isinstance(core, dict):
-        for key, etype in (
-            ("staircase", "staircase"),
+        primary = (
+            ("staircase_hall", "staircase_hall"),
+            ("staircase_shaft", "staircase_shaft"),
             ("elevator_hall", "elevator_hall"),
             ("elevator_shaft", "elevator_shaft"),
+        )
+        fallback = (
+            ("staircase", "staircase"),
             ("elevator", "elevator"),
-        ):
+        )
+        pairs = list(primary)
+        if not all(isinstance(core.get(k), dict) for k, _ in primary):
+            pairs.extend(fallback)
+        for key, etype in pairs:
             info = core.get(key)
             if not isinstance(info, dict):
                 continue
             poly = info.get("polygon") or []
+            if inner_ymax is not None and etype in ("staircase_shaft", "elevator_shaft"):
+                b0 = _bounds_from_polygon(poly)
+                if b0 is not None:
+                    _, _, _, ymax0 = b0
+                    gap = float(inner_ymax) - float(ymax0)
+                    if gap > 1e-6 and gap <= 0.25:
+                        poly = _stretch_rect_polygon_to_ymax(poly, target_ymax=float(inner_ymax))
             b = _bounds_from_polygon(poly)
             if b is None:
                 continue
             minx, miny, maxx, maxy = b
+            fwd = info.get("forward")
+            forward = (
+                [float(fwd[0]), float(fwd[1]), float(fwd[2])]
+                if isinstance(fwd, (list, tuple)) and len(fwd) == 3
+                else None
+            )
             elements.append({
                 "id": f"{floor_id}_{etype}",
                 "type": etype,
@@ -255,6 +313,7 @@ def _flatten_floor_to_elements(
                 "y": round(miny, 2),
                 "width": round(maxx - minx, 2),
                 "height": round(maxy - miny, 2),
+                "forward": forward,
                 "zOrder": _zorder_for(etype),
             })
 

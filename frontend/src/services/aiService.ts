@@ -336,36 +336,61 @@ export function convertV2ToBuildingData(v2: BuildingDataV2): BuildingData {
       });
     }
 
-    // Layer 4b: 核心筒子区域（elevator + staircase，画在底色上方）
-    if (v2.core_tube?.elevator) {
-      const [minX, minY, maxX, maxY] = getBoundsFromPolygon(v2.core_tube.elevator.polygon);
-      elements.push({
-        id: `${floorId}_elevator`,
-        type: 'elevator',
-        polygon: v2.core_tube.elevator.polygon,
-        x: minX, y: minY,
-        width: maxX - minX, height: maxY - minY,
-      });
-    }
-    if (v2.core_tube?.staircase) {
-      const [minX, minY, maxX, maxY] = getBoundsFromPolygon(v2.core_tube.staircase.polygon);
-      elements.push({
-        id: `${floorId}_staircase`,
-        type: 'staircase',
-        polygon: v2.core_tube.staircase.polygon,
-        x: minX, y: minY,
-        width: maxX - minX, height: maxY - minY,
-      });
-    }
-    if (!v2.core_tube?.elevator && !v2.core_tube?.staircase && v2.core_tube?.boundary) {
-      const [minX, minY, maxX, maxY] = getBoundsFromPolygon(v2.core_tube.boundary);
-      elements.push({
-        id: `${floorId}_core_tube`,
-        type: 'elevator',
-        polygon: v2.core_tube.boundary,
-        x: minX, y: minY,
-        width: maxX - minX, height: maxY - minY,
-      });
+    // Layer 4b: 核心筒子区域（优先四分区，否则回退到 elevator + staircase）
+    const core = v2.core_tube;
+    const hasSubzones = !!(core?.staircase_hall && core?.staircase_shaft && core?.elevator_hall && core?.elevator_shaft);
+    if (hasSubzones) {
+      for (const [key, type] of [
+        ['staircase_hall', 'staircase_hall'],
+        ['staircase_shaft', 'staircase_shaft'],
+        ['elevator_hall', 'elevator_hall'],
+        ['elevator_shaft', 'elevator_shaft'],
+      ] as const) {
+        const info = (core as any)[key];
+        if (!info?.polygon) continue;
+        const [minX, minY, maxX, maxY] = getBoundsFromPolygon(info.polygon);
+        elements.push({
+          id: `${floorId}_${type}`,
+          type,
+          polygon: info.polygon,
+          x: minX, y: minY,
+          width: maxX - minX, height: maxY - minY,
+          forward: info.forward,
+        });
+      }
+    } else {
+      if (core?.elevator) {
+        const [minX, minY, maxX, maxY] = getBoundsFromPolygon(core.elevator.polygon);
+        elements.push({
+          id: `${floorId}_elevator`,
+          type: 'elevator',
+          polygon: core.elevator.polygon,
+          x: minX, y: minY,
+          width: maxX - minX, height: maxY - minY,
+          forward: (core as any).elevator?.forward,
+        });
+      }
+      if (core?.staircase) {
+        const [minX, minY, maxX, maxY] = getBoundsFromPolygon(core.staircase.polygon);
+        elements.push({
+          id: `${floorId}_staircase`,
+          type: 'staircase',
+          polygon: core.staircase.polygon,
+          x: minX, y: minY,
+          width: maxX - minX, height: maxY - minY,
+          forward: (core as any).staircase?.forward,
+        });
+      }
+      if (!core?.elevator && !core?.staircase && core?.boundary) {
+        const [minX, minY, maxX, maxY] = getBoundsFromPolygon(core.boundary);
+        elements.push({
+          id: `${floorId}_core_tube`,
+          type: 'elevator',
+          polygon: core.boundary,
+          x: minX, y: minY,
+          width: maxX - minX, height: maxY - minY,
+        });
+      }
     }
 
     // Layer 5: 墙体（优先 polygon 精确渲染，fallback 到 getWallBounds）

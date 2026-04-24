@@ -1,6 +1,6 @@
 {
   "version": "2.1.0",
-  "fingerprint": "9161e59c69caf35df40335d4c9179636f8b06bf70f0c7fbb45051238aa421ae9",
+  "fingerprint": "14e50ab441813f6b298df184943578f9ca2bff2caf4b75af201a8b38461a6f17",
   "semanticColors": {
     "fallback": "#FF00FF"
   },
@@ -36,6 +36,10 @@
     "aisle": "#a1a1aa",
     "staircase": "#b45309",
     "elevator": "#06b6d4",
+    "staircase_hall": "#9ca3af",
+    "staircase_shaft": "#b45309",
+    "elevator_hall": "#9ca3af",
+    "elevator_shaft": "#06b6d4",
     "pipe_shaft": "#064e3b",
     "kitchen": "#fb923c",
     "bathroom": "#2dd4bf",

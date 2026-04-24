@@ -61,10 +61,14 @@ class CoreTube:
     # 子区域
     elevator: Optional[BaseGeometry] = None
     staircase: Optional[Polygon] = None
+    staircase_hall: Optional[Polygon] = None
+    staircase_shaft: Optional[Polygon] = None
     elevator_hall: Optional[Polygon] = None
     elevator_shaft: Optional[Polygon] = None
     elevator_area: float = 0.0
     staircase_area: float = 0.0
+    staircase_hall_area: float = 0.0
+    staircase_shaft_area: float = 0.0
     elevator_hall_area: float = 0.0
     elevator_shaft_area: float = 0.0
 
@@ -74,26 +78,41 @@ class CoreTube:
         h = maxy - miny
         if w <= 0 or h <= 0:
             self.staircase = None
+            self.staircase_hall = None
+            self.staircase_shaft = None
             self.elevator_hall = None
             self.elevator_shaft = None
             self.elevator = None
             self.staircase_area = 0.0
+            self.staircase_hall_area = 0.0
+            self.staircase_shaft_area = 0.0
             self.elevator_hall_area = 0.0
             self.elevator_shaft_area = 0.0
             self.elevator_area = 0.0
             return
 
         split_x = minx + 0.4 * w
-        split_y = miny + 0.5 * h
+        stair_split_y = miny + 0.3 * h
+        elev_split_y = miny + 0.5 * h
 
-        staircase = box(minx, miny, split_x, maxy)
-        elevator_hall = box(split_x, miny, maxx, split_y)
-        elevator_shaft = box(split_x, split_y, maxx, maxy)
+        staircase_hall = box(minx, miny, split_x, stair_split_y)
+        staircase_shaft = box(minx, stair_split_y, split_x, maxy)
+        try:
+            merged_s = unary_union([staircase_hall, staircase_shaft])
+            staircase = merged_s if isinstance(merged_s, Polygon) else staircase_hall
+        except Exception:
+            staircase = staircase_hall
+        elevator_hall = box(split_x, miny, maxx, elev_split_y)
+        elevator_shaft = box(split_x, elev_split_y, maxx, maxy)
 
         self.staircase = staircase
+        self.staircase_hall = staircase_hall
+        self.staircase_shaft = staircase_shaft
         self.elevator_hall = elevator_hall
         self.elevator_shaft = elevator_shaft
         self.staircase_area = float(staircase.area)
+        self.staircase_hall_area = float(staircase_hall.area)
+        self.staircase_shaft_area = float(staircase_shaft.area)
         self.elevator_hall_area = float(elevator_hall.area)
         self.elevator_shaft_area = float(elevator_shaft.area)
         try:
@@ -185,6 +204,24 @@ class CoreTube:
             else:
                 core.staircase = None
                 core.staircase_area = 0.0
+        if core.staircase_hall is not None and not floor_poly.contains(core.staircase_hall):
+            logger.warning("Staircase hall extends beyond floor boundary, shrinking")
+            clipped = core.staircase_hall.intersection(floor_poly)
+            if not clipped.is_empty and isinstance(clipped, Polygon):
+                core.staircase_hall = clipped
+                core.staircase_hall_area = float(clipped.area)
+            else:
+                core.staircase_hall = None
+                core.staircase_hall_area = 0.0
+        if core.staircase_shaft is not None and not floor_poly.contains(core.staircase_shaft):
+            logger.warning("Staircase shaft extends beyond floor boundary, shrinking")
+            clipped = core.staircase_shaft.intersection(floor_poly)
+            if not clipped.is_empty and isinstance(clipped, Polygon):
+                core.staircase_shaft = clipped
+                core.staircase_shaft_area = float(clipped.area)
+            else:
+                core.staircase_shaft = None
+                core.staircase_shaft_area = 0.0
         if core.elevator_hall is not None and not floor_poly.contains(core.elevator_hall):
             logger.warning("Elevator hall extends beyond floor boundary, shrinking")
             clipped = core.elevator_hall.intersection(floor_poly)
@@ -208,6 +245,16 @@ class CoreTube:
                 merged: BaseGeometry = unary_union([core.elevator_hall, core.elevator_shaft])
                 core.elevator = merged
                 core.elevator_area = float(merged.area)
+        except Exception:
+            pass
+
+        try:
+            parts = [p for p in (core.staircase_hall, core.staircase_shaft) if p is not None and not p.is_empty]
+            if parts:
+                merged_s: BaseGeometry = unary_union(parts)
+                if isinstance(merged_s, Polygon) and not merged_s.is_empty:
+                    core.staircase = merged_s
+                    core.staircase_area = float(merged_s.area)
         except Exception:
             pass
 

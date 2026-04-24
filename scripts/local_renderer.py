@@ -150,9 +150,13 @@ def _seg_canonical_type(elem: Dict[str, Any]) -> str:
         return "__furniture_unknown__"
     if "wall" in t_lower:
         return "wall"
+    if t == "elevator_hall":
+        return "floor_slab"
     if t in {"elevator", "elevator_shaft"}:
         return "elevator"
-    if t == "staircase":
+    if t == "staircase_hall":
+        return "floor_slab"
+    if t in {"staircase", "staircase_shaft"}:
         return "staircase"
     if t == "floor_slab":
         return "floor_slab"
@@ -179,18 +183,8 @@ def _seg_facecolor(elem: Dict[str, Any]) -> str:
 def _elem_bounds_center(elem: Dict[str, Any]) -> Optional[Tuple[float, float]]:
     poly = elem.get("polygon")
     if isinstance(poly, list) and len(poly) >= 3:
-        xs: List[float] = []
-        ys: List[float] = []
-        for p in poly:
-            if not (isinstance(p, (list, tuple)) and len(p) >= 2):
-                continue
-            if p[0] is None or p[1] is None:
-                continue
-            try:
-                xs.append(float(p[0]))
-                ys.append(float(p[1]))
-            except Exception:
-                continue
+        xs = [float(p[0]) for p in poly if isinstance(p, (list, tuple)) and len(p) >= 2]
+        ys = [float(p[1]) for p in poly if isinstance(p, (list, tuple)) and len(p) >= 2]
         if xs and ys:
             return ((min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2)
     if all(k in elem for k in ("x", "y", "width", "height")):

@@ -174,6 +174,10 @@ export interface CoreTubeV2 {
   area: number;
   elevator?: { polygon: [number, number][]; area: number };
   staircase?: { polygon: [number, number][]; area: number };
+  elevator_hall?: { polygon: [number, number][]; area: number; forward?: [number, number, number] };
+  elevator_shaft?: { polygon: [number, number][]; area: number; forward?: [number, number, number] };
+  staircase_hall?: { polygon: [number, number][]; area: number; forward?: [number, number, number] };
+  staircase_shaft?: { polygon: [number, number][]; area: number; forward?: [number, number, number] };
 }
 
 export interface WallV2 {

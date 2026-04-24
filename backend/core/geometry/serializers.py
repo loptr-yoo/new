@@ -5,7 +5,9 @@ serializers.py
 """
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+import math
+import re
+from typing import Any, Dict, List, Optional, Tuple
 
 from shapely.geometry import Polygon
 
@@ -14,12 +16,8 @@ from .layout_generator import LayoutResultV2, RoomResult
 from .postprocessor import (
     PostprocessResult,
     door_to_dict,
-    generate_doors,
     generate_walls_from_topology,
     generate_wall_mesh,
-    generate_windows,
-    generate_windows_from_exterior_walls,
-    generate_windows_from_floor_boundary,
     postprocess_floor,
     wall_to_dict,
     window_to_dict,
@@ -87,6 +85,24 @@ def core_tube_to_dict(core_tube: Any) -> dict:
                 for x, y in core_tube.staircase.exterior.coords
             ],
             "area": round(core_tube.staircase_area, 2),
+        }
+
+    if hasattr(core_tube, "staircase_hall") and core_tube.staircase_hall is not None:
+        result["staircase_hall"] = {
+            "polygon": [
+                [round(x, 2), round(y, 2)]
+                for x, y in core_tube.staircase_hall.exterior.coords
+            ],
+            "area": round(getattr(core_tube, "staircase_hall_area", 0.0), 2),
+        }
+
+    if hasattr(core_tube, "staircase_shaft") and core_tube.staircase_shaft is not None:
+        result["staircase_shaft"] = {
+            "polygon": [
+                [round(x, 2), round(y, 2)]
+                for x, y in core_tube.staircase_shaft.exterior.coords
+            ],
+            "area": round(getattr(core_tube, "staircase_shaft_area", 0.0), 2),
         }
 
     if hasattr(core_tube, "elevator_hall") and core_tube.elevator_hall is not None:
@@ -161,6 +177,39 @@ def building_result_to_dict(
     minx, miny, maxx, maxy = floor_boundary.bounds
 
     floors: Dict[str, dict] = {}
+    floor_ids = list(result.floor_layouts.keys())
+
+    def _floor_number(fid: str) -> int:
+        m = re.match(r"^f(\d+)$", (fid or "").strip().lower())
+        return int(m.group(1)) if m else 10**9
+
+    ground_floor_id = "F1" if "F1" in floor_ids else None
+    if ground_floor_id is None and floor_ids:
+        min_num = min((_floor_number(fid) for fid in floor_ids), default=10**9)
+        for fid in floor_ids:
+            if _floor_number(fid) == min_num:
+                ground_floor_id = fid
+                break
+
+    core_forward: Dict[str, List[float]] = {}
+
+    def _center_from_poly(poly: Any) -> Optional[Tuple[float, float]]:
+        try:
+            if poly is None or poly.is_empty:
+                return None
+            c = poly.centroid
+            return (float(c.x), float(c.y))
+        except Exception:
+            return None
+
+    def _calculate_forward(p1: Tuple[float, float], p2: Tuple[float, float]) -> List[float]:
+        dx = float(p2[0]) - float(p1[0])
+        dz = float(p2[1]) - float(p1[1])
+        length = float(math.hypot(dx, dz))
+        if length < 1e-3:
+            return [1.0, 0.0, 0.0]
+        return [float(dx / length), 0.0, float(dz / length)]
+
     for floor_id, layout in result.floor_layouts.items():
         rooms = [room_result_to_dict(r, floor_id) for r in layout.room_layouts]
 
@@ -182,7 +231,8 @@ def building_result_to_dict(
         if layout.core_tube is not None and hasattr(layout.core_tube, "polygon") and not layout.core_tube.polygon.is_empty:
             ct = layout.core_tube
             subzones = [
-                ("core_staircase", "staircase", getattr(ct, "staircase", None)),
+                ("core_staircase_hall", "staircase_hall", getattr(ct, "staircase_hall", None)),
+                ("core_staircase_shaft", "staircase_shaft", getattr(ct, "staircase_shaft", None)),
                 ("core_elevator_hall", "elevator_hall", getattr(ct, "elevator_hall", None)),
                 ("core_elevator_shaft", "elevator_shaft", getattr(ct, "elevator_shaft", None)),
             ]
@@ -257,24 +307,75 @@ def building_result_to_dict(
             if has_window:
                 rooms_needing_window.add(room_id)
 
-        pp_doors = generate_doors(pp_walls, zone_types=zone_types, zone_rects=room_rects)
-        exterior_thickness = next((w.thickness for w in pp_walls if w.type == "exterior_wall"), 0.24)
-        pp_windows = generate_windows_from_floor_boundary(
-            room_rects=room_rects,
+        is_ground_floor = bool(ground_floor_id and floor_id == ground_floor_id)
+        pp = postprocess_floor(
+            rooms=layout.room_layouts,
+            floor_boundary=floor_boundary,
+            corridors=layout.corridors if hasattr(layout, "corridors") else [],
+            is_ground_floor=is_ground_floor,
+            walls=pp_walls,
             zone_types=zone_types,
+            zone_rects=room_rects,
             rooms_needing_window=rooms_needing_window,
             floor_bounds=floor_boundary.bounds,
-            exterior_thickness=float(exterior_thickness),
         )
+
+        if is_ground_floor and not core_forward and layout.core_tube is not None:
+            corridor_centers: List[Tuple[float, float]] = []
+            if hasattr(layout, "corridors") and layout.corridors:
+                for c in layout.corridors:
+                    try:
+                        poly = getattr(c, "polygon", None)
+                        if poly is None or poly.is_empty:
+                            continue
+                        minx, miny, maxx, maxy = poly.bounds
+                        corridor_centers.append((float((minx + maxx) / 2), float((miny + maxy) / 2)))
+                    except Exception:
+                        continue
+            default_dir = [1.0, 0.0, 0.0]
+            ct = layout.core_tube
+            ch = _center_from_poly(getattr(ct, "staircase_hall", None))
+            cs = _center_from_poly(getattr(ct, "staircase_shaft", None))
+            eh = _center_from_poly(getattr(ct, "elevator_hall", None))
+            es = _center_from_poly(getattr(ct, "elevator_shaft", None))
+
+            def _nearest_corr(p: Optional[Tuple[float, float]]) -> Optional[Tuple[float, float]]:
+                if p is None or not corridor_centers:
+                    return None
+                best = None
+                best_d = 1e18
+                for cc in corridor_centers:
+                    d = (cc[0] - p[0]) ** 2 + (cc[1] - p[1]) ** 2
+                    if d < best_d:
+                        best_d = d
+                        best = cc
+                return best
+
+            if ch is not None:
+                tgt = _nearest_corr(ch)
+                core_forward["staircase_hall"] = _calculate_forward(ch, tgt) if tgt else default_dir
+            if cs is not None:
+                tgt = ch or _nearest_corr(cs)
+                core_forward["staircase_shaft"] = _calculate_forward(cs, tgt) if tgt else default_dir
+            if eh is not None:
+                tgt = _nearest_corr(eh)
+                core_forward["elevator_hall"] = _calculate_forward(eh, tgt) if tgt else default_dir
+            if es is not None:
+                tgt = eh or _nearest_corr(es)
+                core_forward["elevator_shaft"] = _calculate_forward(es, tgt) if tgt else default_dir
+            if "elevator_hall" in core_forward:
+                core_forward["elevator"] = list(core_forward["elevator_hall"])
+            if "staircase_hall" in core_forward:
+                core_forward["staircase"] = list(core_forward["staircase_hall"])
 
         floors[floor_id] = {
             "floor_name": floor_id,
             "floor_slab": slab,
             "corridors": corridors,
             "rooms": rooms,
-            "walls": [wall_to_dict(w) for w in pp_walls],
-            "doors": [door_to_dict(d) for d in pp_doors],
-            "windows": [window_to_dict(w) for w in pp_windows],
+            "walls": [wall_to_dict(w) for w in pp.walls],
+            "doors": [door_to_dict(d) for d in pp.doors],
+            "windows": [window_to_dict(w) for w in pp.windows],
             "generation_time_ms": round(layout.generation_time_ms, 1),
             "warnings": floor_warnings,
         }
@@ -282,13 +383,20 @@ def building_result_to_dict(
     # 降级摘要
     degradation_summary = _build_degradation_summary(result.warnings)
 
+    ct_dict = core_tube_to_dict(result.core_tube) if result.core_tube else None
+    if isinstance(ct_dict, dict) and core_forward:
+        for k, fwd in core_forward.items():
+            info = ct_dict.get(k)
+            if isinstance(info, dict):
+                info["forward"] = fwd
+
     return {
         "building": {
             "width": round(maxx - minx, 2),
             "depth": round(maxy - miny, 2),
             "floors": floors,
         },
-        "core_tube": core_tube_to_dict(result.core_tube) if result.core_tube else None,
+        "core_tube": ct_dict,
         "warnings": result.warnings,
         "degradation_summary": degradation_summary,
     }

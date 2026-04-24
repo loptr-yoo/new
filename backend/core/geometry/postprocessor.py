@@ -9,6 +9,7 @@ postprocessor.py
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass, field
 from typing import Dict, FrozenSet, List, Optional, Set, Tuple
 
@@ -25,7 +26,6 @@ from shapely.geometry import (
     box,
 )
 from shapely.geometry.base import BaseGeometry
-from shapely.ops import snap
 
 logger = logging.getLogger(__name__)
 
@@ -173,41 +173,125 @@ def generate_walls_from_topology(
 
     floor_poly = box(fminx, fminy, fmaxx, fmaxy)
 
-    def _snap_room_rects(
-        rects: Dict[str, Tuple[float, float, float, float]],
-        tolerance: float,
-    ) -> Dict[str, Tuple[float, float, float, float]]:
-        if tolerance <= 0 or len(rects) < 2:
-            return rects
-        poly_map: Dict[str, Polygon] = {}
-        for zid, (x, y, w, h) in rects.items():
-            if w <= 0 or h <= 0:
-                continue
-            poly_map[zid] = box(float(x), float(y), float(x + w), float(y + h))
-        ids = list(poly_map.keys())
-        for i in range(len(ids)):
-            ida = ids[i]
-            pa = poly_map[ida]
-            for j in range(i + 1, len(ids)):
-                idb = ids[j]
-                pb = poly_map[idb]
-                try:
-                    pa = snap(pa, pb, tolerance)
-                    pb = snap(pb, pa, tolerance)
-                    if isinstance(pa, Polygon) and not pa.is_empty:
-                        poly_map[ida] = pa
-                    if isinstance(pb, Polygon) and not pb.is_empty:
-                        poly_map[idb] = pb
-                except Exception:
-                    continue
-        out: Dict[str, Tuple[float, float, float, float]] = dict(rects)
-        for zid, p in poly_map.items():
-            minx, miny, maxx, maxy = p.bounds
-            out[zid] = (float(minx), float(miny), float(maxx - minx), float(maxy - miny))
-        return out
+    orig_room_rects: Dict[str, Tuple[float, float, float, float]] = {
+        k: (float(v[0]), float(v[1]), float(v[2]), float(v[3])) for k, v in room_rects.items()
+    }
+    working_rects: Dict[str, Tuple[float, float, float, float]] = {
+        k: (float(v[0]), float(v[1]), float(v[2]), float(v[3])) for k, v in room_rects.items()
+    }
 
-    room_rects = _snap_room_rects(room_rects, tolerance=snap_tolerance)
+    align_tolerance = 0.4
+
+    anchor_x: Set[float] = {float(fminx), float(fmaxx)}
+    anchor_y: Set[float] = {float(fminy), float(fmaxy)}
+    for zid, (x, y, w, h) in working_rects.items():
+        zt = str(zone_types.get(zid) or "")
+        if ("elevator" in zt) or ("staircase" in zt):
+            anchor_x.update([float(x), float(x + w)])
+            anchor_y.update([float(y), float(y + h)])
+
+    all_x: List[float] = []
+    all_y: List[float] = []
+    for x, y, w, h in working_rects.values():
+        all_x.extend([float(x), float(x + w)])
+        all_y.extend([float(y), float(y + h)])
+
+    def _build_grid(coords: List[float], anchors: Set[float]) -> List[float]:
+        if not coords:
+            return sorted(float(a) for a in anchors)
+        sorted_c = sorted(float(c) for c in coords)
+        grid: List[float] = []
+        cluster_start = float(sorted_c[0])
+        current_cluster: List[float] = [float(sorted_c[0])]
+
+        def _finalize(cluster: List[float]) -> None:
+            if not cluster:
+                return
+            avg = float(sum(cluster) / len(cluster))
+            nearest_anchor = None
+            nearest_d = 1e18
+            for a in anchors:
+                d = abs(float(a) - avg)
+                if d < nearest_d:
+                    nearest_d = d
+                    nearest_anchor = float(a)
+            if nearest_anchor is not None and nearest_d <= float(align_tolerance):
+                grid.append(float(nearest_anchor))
+            else:
+                grid.append(avg)
+
+        for c in sorted_c[1:]:
+            c = float(c)
+            if c - cluster_start <= float(align_tolerance):
+                current_cluster.append(c)
+            else:
+                _finalize(current_cluster)
+                cluster_start = c
+                current_cluster = [c]
+        _finalize(current_cluster)
+
+        for a in anchors:
+            if not any(abs(float(g) - float(a)) < 1e-4 for g in grid):
+                grid.append(float(a))
+        grid = sorted(grid)
+        return grid
+
+    def _snap_to_grid(val: float, grid: List[float]) -> float:
+        if not grid:
+            return float(val)
+        nearest = min(grid, key=lambda g: abs(float(g) - float(val)))
+        if abs(float(nearest) - float(val)) <= float(align_tolerance):
+            return float(nearest)
+        return float(val)
+
+    grid_x = _build_grid(all_x, anchors=anchor_x)
+    grid_y = _build_grid(all_y, anchors=anchor_y)
+
+    for zid, (x, y, w, h) in list(working_rects.items()):
+        zt = str(zone_types.get(zid) or "")
+        if ("elevator" in zt) or ("staircase" in zt):
+            continue
+        new_x1 = _snap_to_grid(float(x), grid_x)
+        new_x2 = _snap_to_grid(float(x + w), grid_x)
+        new_y1 = _snap_to_grid(float(y), grid_y)
+        new_y2 = _snap_to_grid(float(y + h), grid_y)
+        if (new_x2 - new_x1) > 0.1 and (new_y2 - new_y1) > 0.1:
+            working_rects[zid] = (float(new_x1), float(new_y1), float(new_x2 - new_x1), float(new_y2 - new_y1))
+
+    should_rollback = False
+    for zid, (nx, ny, nw, nh) in working_rects.items():
+        o = orig_room_rects.get(zid)
+        if o is None:
+            should_rollback = True
+            break
+        ox, oy, ow, oh = (float(o[0]), float(o[1]), float(o[2]), float(o[3]))
+        if float(nw) <= 0.1 or float(nh) <= 0.1:
+            should_rollback = True
+            break
+        orig_area = float(ow) * float(oh)
+        new_area = float(nw) * float(nh)
+        if orig_area <= 1e-9:
+            should_rollback = True
+            break
+        if abs(float(new_area) - float(orig_area)) / float(orig_area) > 0.15:
+            should_rollback = True
+            break
+        max_edge_move = max(
+            abs(float(nx) - float(ox)),
+            abs(float(ny) - float(oy)),
+            abs(float(nx + nw) - float(ox + ow)),
+            abs(float(ny + nh) - float(oy + oh)),
+        )
+        if float(max_edge_move) > float(align_tolerance):
+            should_rollback = True
+            break
+
+    if should_rollback:
+        room_rects = {k: (float(v[0]), float(v[1]), float(v[2]), float(v[3])) for k, v in orig_room_rects.items()}
+    else:
+        room_rects = working_rects
     edge_set_aug: Dict[FrozenSet[str], str] = dict(edge_set)
+    forced_edges: Set[FrozenSet[str]] = set()
 
     def _augment_edge_set_from_rects(
         rects: Dict[str, Tuple[float, float, float, float]],
@@ -241,6 +325,78 @@ def generate_walls_from_topology(
 
     _augment_edge_set_from_rects(room_rects, edge_set_aug, tol=snap_tolerance)
 
+    def _force_core_edges(
+        rects: Dict[str, Tuple[float, float, float, float]],
+        edges: Dict[FrozenSet[str], str],
+        tol: float,
+    ) -> None:
+        def _zt(zid: str) -> str:
+            return str(zone_types.get(zid) or "")
+
+        def _is_room(zt: str) -> bool:
+            return zt == "room"
+
+        def _is_corridor(zt: str) -> bool:
+            return zt == "corridor"
+
+        def _is_elevator_any(zt: str) -> bool:
+            return zt in ("elevator_hall", "elevator_shaft")
+
+        def _is_stair_any(zt: str) -> bool:
+            return zt in ("staircase_hall", "staircase_shaft")
+
+        ids = list(rects.keys())
+        for i in range(len(ids)):
+            ida = ids[i]
+            ta = _zt(ida)
+            ax, ay, aw, ah = rects[ida]
+            for j in range(i + 1, len(ids)):
+                idb = ids[j]
+                tb = _zt(idb)
+                bx, by, bw, bh = rects[idb]
+
+                if not ta or not tb:
+                    continue
+
+                if (ta == "elevator_hall" and tb == "elevator_shaft") or (ta == "elevator_shaft" and tb == "elevator_hall"):
+                    continue
+                if (ta == "staircase_hall" and tb == "staircase_shaft") or (ta == "staircase_shaft" and tb == "staircase_hall"):
+                    continue
+
+                must = False
+                if (_is_elevator_any(ta) and _is_room(tb)) or (_is_elevator_any(tb) and _is_room(ta)):
+                    must = True
+                elif (_is_stair_any(ta) and _is_room(tb)) or (_is_stair_any(tb) and _is_room(ta)):
+                    must = True
+                elif (ta == "elevator_hall" and tb == "staircase_hall") or (tb == "elevator_hall" and ta == "staircase_hall"):
+                    must = True
+                elif ((ta in ("elevator_hall", "staircase_hall") and _is_corridor(tb)) or (tb in ("elevator_hall", "staircase_hall") and _is_corridor(ta))):
+                    must = True
+                elif (ta == "staircase_shaft" and tb == "elevator_hall") or (tb == "staircase_shaft" and ta == "elevator_hall"):
+                    must = True
+                if not must:
+                    continue
+
+                key = frozenset({ida, idb})
+                forced_edges.add(key)
+
+                overlap_y = min(ay + ah, by + bh) - max(ay, by)
+                overlap_x = min(ax + aw, bx + bw) - max(ax, bx)
+                near_vertical = min(
+                    abs((ax + aw) - bx),
+                    abs(ax - (bx + bw)),
+                ) <= tol
+                near_horizontal = min(
+                    abs((ay + ah) - by),
+                    abs(ay - (by + bh)),
+                ) <= tol
+                if near_vertical and overlap_y > 0.05:
+                    edges[key] = "vertical"
+                elif near_horizontal and overlap_x > 0.05:
+                    edges[key] = "horizontal"
+
+    _force_core_edges(room_rects, edge_set_aug, tol=snap_tolerance)
+
     def _clip_line_to_floor(line: LineString) -> LineString:
         try:
             clipped = line.intersection(floor_poly)
@@ -257,10 +413,16 @@ def generate_walls_from_topology(
             continue
         t1 = zone_types.get(id_a)
         t2 = zone_types.get(id_b)
+        force_keep = edge_key in forced_edges
         
         # 物理抹除：如果一边是电梯井，一边是电梯厅，跳过，不生成任何墙体
         if (t1 == "elevator_shaft" and t2 == "elevator_hall") or \
            (t1 == "elevator_hall" and t2 == "elevator_shaft"):
+            continue
+
+        # 楼梯井与楼梯厅之间不应有墙体（保持连续平地）
+        if (t1 == "staircase_shaft" and t2 == "staircase_hall") or \
+           (t1 == "staircase_hall" and t2 == "staircase_shaft"):
             continue
         ax, ay, aw, ah = room_rects[id_a]
         bx, by, bw, bh = room_rects[id_b]
@@ -274,7 +436,12 @@ def generate_walls_from_topology(
                 shared_x = (ax + (bx + bw)) / 2.0
             y0 = max(ay, by)
             y1 = min(ay + ah, by + bh)
-            if (y1 - y0) > min_wall_length:
+
+            min_len = 0.05 if (("corridor" in str(t1 or "")) or ("corridor" in str(t2 or ""))) else float(min_wall_length)
+            if (y1 - y0) > min_len:
+                if not force_keep and (("shaft" in str(t1 or "")) or ("shaft" in str(t2 or ""))):
+                    if abs(float(shared_x) - float(fminx)) <= 0.05 or abs(float(shared_x) - float(fmaxx)) <= 0.05:
+                        continue
                 line = _extend_line(LineString([(shared_x, y0), (shared_x, y1)]), wall_thickness / 2)
                 line = _clip_line_to_floor(line)
                 walls.append(WallSegment(
@@ -292,7 +459,12 @@ def generate_walls_from_topology(
                 shared_y = (ay + (by + bh)) / 2.0
             x0 = max(ax, bx)
             x1 = min(ax + aw, bx + bw)
-            if (x1 - x0) > min_wall_length:
+
+            min_len = 0.05 if (("corridor" in str(t1 or "")) or ("corridor" in str(t2 or ""))) else float(min_wall_length)
+            if (x1 - x0) > min_len:
+                if not force_keep and (("shaft" in str(t1 or "")) or ("shaft" in str(t2 or ""))):
+                    if abs(float(shared_y) - float(fminy)) <= 0.05 or abs(float(shared_y) - float(fmaxy)) <= 0.05:
+                        continue
                 line = _extend_line(LineString([(x0, shared_y), (x1, shared_y)]), wall_thickness / 2)
                 line = _clip_line_to_floor(line)
                 walls.append(WallSegment(
@@ -310,7 +482,7 @@ def generate_walls_from_topology(
     ]
 
     def _has_neighbor_below(top_y: float, x0: float, x1: float, self_id: str) -> bool:
-        for oid, (ox, oy, ow, oh) in room_rects.items():
+        for oid, (ox, oy, ow, _) in room_rects.items():
             if oid == self_id:
                 continue
             if abs(float(oy) - float(top_y)) > neighbor_tol:
@@ -325,11 +497,14 @@ def generate_walls_from_topology(
         top_y = float(y + h)
         if top_y > (inner_ymax - 0.02):
             continue
+        zt0 = str(zone_types.get(zid) or "")
+        gap = max(0.0, inner_ymax - top_y)
+        if "shaft" in zt0 and gap <= 0.25:
+            continue
         if _has_neighbor_below(top_y=top_y, x0=float(x), x1=float(x + w), self_id=zid):
             continue
         if float(w) <= min_wall_length:
             continue
-        gap = max(0.0, inner_ymax - top_y)
         safe_thickness = min(float(wall_thickness), max(0.02, gap - 0.01))
         line = _extend_line(LineString([(float(x), top_y), (float(x + w), top_y)]), safe_thickness / 2)
         line = _clip_line_to_floor(line)
@@ -611,7 +786,7 @@ def generate_doors(
     doors: List[DoorPlacement] = []
 
     def _is_door_space(zt: str) -> bool:
-        return zt in ("room", "staircase", "elevator_hall")
+        return zt in ("room", "staircase", "staircase_hall", "elevator_hall")
 
     def get_type(zid: str) -> str:
         zt_lower = zid.lower()
@@ -639,7 +814,7 @@ def generate_doors(
             return (1.0, 0.0, 0.0)
         return (0.0, 0.0, 1.0)
 
-    def _door_forward(pos: Tuple[float, float], connects: List[str], rotation: float) -> Tuple[float, float, float]:
+    def _door_forward(_pos: Tuple[float, float], connects: List[str], rotation: float) -> Tuple[float, float, float]:
         if zone_types is None or zone_rects is None or len(connects) != 2:
             return _default_forward(rotation)
         a, b = connects[0], connects[1]
@@ -665,26 +840,88 @@ def generate_doors(
         dx, dy = _normalize_2d(float(c_to[0]) - float(c_from[0]), float(c_to[1]) - float(c_from[1]))
         return (float(dx), 0.0, float(dy))
 
-    def _door_point(wall: WallSegment) -> Optional[Tuple[float, float]]:
-        if wall.length < (door_width + 2 * margin):
+    def _door_point_with_width(wall: WallSegment, w: float) -> Optional[Tuple[float, float]]:
+        if wall.length < (float(w) + 2 * margin):
             return None
         x0, y0 = wall.geometry.coords[0]
         x1, y1 = wall.geometry.coords[1]
         return ((x0 + x1) / 2, (y0 + y1) / 2)
 
+    def _door_point(wall: WallSegment) -> Optional[Tuple[float, float]]:
+        return _door_point_with_width(wall, float(door_width))
+
+    def _core_hall_door_width(wall: WallSegment) -> Optional[float]:
+        usable = float(wall.length) - 2 * float(margin) - 0.02
+        w = min(0.8, usable)
+        if w < 0.6:
+            return None
+        return float(w)
+
+    def _door_point_staircase_hall_elevator_hall(
+        wall: WallSegment,
+        staircase_hall_zid: str,
+        elevator_hall_zid: str,
+        w: float,
+    ) -> Optional[Tuple[float, float]]:
+        if zone_rects is None:
+            return _door_point_with_width(wall, w)
+        stair = zone_rects.get(staircase_hall_zid)
+        hall = zone_rects.get(elevator_hall_zid)
+        if stair is None or hall is None:
+            return _door_point_with_width(wall, w)
+        sx, sy, sw, sh = stair
+        hx, hy, hw, hh = hall
+
+        rot = _wall_rotation(wall)
+        x0, y0 = wall.geometry.coords[0]
+        x1, y1 = wall.geometry.coords[1]
+
+        clear_margin = float(w) / 2 + 0.05
+
+        if abs(float(rot) - 90.0) < 1e-6:
+            y_line0 = float(min(y0, y1))
+            y_line1 = float(max(y0, y1))
+            y_hall0 = float(hy)
+            y_hall1 = float(hy + hh)
+            y_stair0 = float(sy)
+            y_stair1 = float(sy + sh)
+            seg0 = max(y_line0, y_hall0, y_stair0)
+            seg1 = min(y_line1, y_hall1, y_stair1)
+            if seg1 <= seg0:
+                return _door_point_with_width(wall, w)
+            lo = seg0 + clear_margin
+            hi = seg1 - clear_margin
+            if hi < lo:
+                return _door_point_with_width(wall, w)
+            return (float(x0), float(lo))
+
+        x_line0 = float(min(x0, x1))
+        x_line1 = float(max(x0, x1))
+        x_hall0 = float(hx)
+        x_hall1 = float(hx + hw)
+        x_stair0 = float(sx)
+        x_stair1 = float(sx + sw)
+        seg0 = max(x_line0, x_hall0, x_stair0)
+        seg1 = min(x_line1, x_hall1, x_stair1)
+        if seg1 <= seg0:
+            return _door_point_with_width(wall, w)
+        lo = seg0 + clear_margin
+        hi = seg1 - clear_margin
+        if hi < lo:
+            return _door_point_with_width(wall, w)
+        return (float(lo), float(y0))
+
     def _door_point_staircase_elevator_hall(
         wall: WallSegment,
         staircase_zid: str,
         elevator_hall_zid: str,
-    ) -> Optional[Tuple[Tuple[float, float], float]]:
+    ) -> Optional[Tuple[float, float]]:
         if zone_rects is None:
-            p = _door_point(wall)
-            return (p, float(door_width)) if p is not None else None
+            return _door_point(wall)
         stair = zone_rects.get(staircase_zid)
         hall = zone_rects.get(elevator_hall_zid)
         if stair is None or hall is None:
-            p = _door_point(wall)
-            return (p, float(door_width)) if p is not None else None
+            return _door_point(wall)
         sx, sy, sw, sh = stair
         hx, hy, hw, hh = hall
 
@@ -729,7 +966,7 @@ def generate_doors(
             else:
                 landing_y0, landing_y1 = (stair_maxy - lh, stair_maxy)
 
-        half = float(door_width) / 2
+        clear_margin = float(door_width) / 2 + 0.05
 
         if abs(float(rot) - 90.0) < 1e-6:
             y_line0 = float(min(y0, y1))
@@ -746,20 +983,19 @@ def generate_doors(
                 seg1 = min(seg1, landing_y1)
             else:
                 if not (landing_x0 - 1e-6 <= x_const <= landing_x1 + 1e-6):
-                    p = _door_point(wall)
-                    return (p, float(door_width)) if p is not None else None
+                    return _door_point(wall)
             if seg1 <= seg0:
-                p = _door_point(wall)
-                return (p, float(door_width)) if p is not None else None
-            avail = float(seg1 - seg0)
-            door_w = float(min(float(door_width), avail))
-            lo = float(seg0) + door_w / 2
-            hi = float(seg1) - door_w / 2
+                return _door_point(wall)
+            lo = seg0 + clear_margin
+            hi = seg1 - clear_margin
             if hi < lo:
-                p = _door_point(wall)
-                return (p, float(door_width)) if p is not None else None
-            y = lo if side == "min" else hi
-            return ((x_const, float(y)), door_w)
+                lo = seg0
+                hi = seg1
+            if side == "min":
+                y = lo
+            else:
+                y = hi
+            return (x_const, float(y))
 
         x_line0 = float(min(x0, x1))
         x_line1 = float(max(x0, x1))
@@ -775,20 +1011,19 @@ def generate_doors(
             seg1 = min(seg1, landing_x1)
         else:
             if not (landing_y0 - 1e-6 <= y_const <= landing_y1 + 1e-6):
-                p = _door_point(wall)
-                return (p, float(door_width)) if p is not None else None
+                return _door_point(wall)
         if seg1 <= seg0:
-            p = _door_point(wall)
-            return (p, float(door_width)) if p is not None else None
-        avail = float(seg1 - seg0)
-        door_w = float(min(float(door_width), avail))
-        lo = float(seg0) + door_w / 2
-        hi = float(seg1) - door_w / 2
+            return _door_point(wall)
+        lo = seg0 + clear_margin
+        hi = seg1 - clear_margin
         if hi < lo:
-            p = _door_point(wall)
-            return (p, float(door_width)) if p is not None else None
-        x = lo if side == "min" else hi
-        return ((float(x), y_const), door_w)
+            lo = seg0
+            hi = seg1
+        if side == "min":
+            x = lo
+        else:
+            x = hi
+        return (float(x), y_const)
 
     def _wall_key(w: WallSegment) -> Tuple:
         coords = list(w.geometry.coords)
@@ -798,24 +1033,53 @@ def generate_doors(
         return (w.type, round(float(w.thickness), 3), p1, p2)
 
     candidates: List[WallSegment] = []
+    hall_hall_walls: List[WallSegment] = []
 
     for wall in walls:
         if wall.type != "partition_wall":
             continue
         if len(wall.room_ids) != 2:
             continue
-        if wall.length < door_width:
-            continue
 
         if zone_types is not None:
             a, b = wall.room_ids[0], wall.room_ids[1]
             type_a = get_type(a)
             type_b = get_type(b)
+            if (type_a == "staircase_hall" and type_b == "elevator_hall") or (type_b == "staircase_hall" and type_a == "elevator_hall"):
+                if wall.length >= 0.6:
+                    hall_hall_walls.append(wall)
+                continue
+            if (type_a == "staircase_shaft" and type_b == "elevator_hall") or (type_b == "staircase_shaft" and type_a == "elevator_hall"):
+                continue
             if "elevator_shaft" in (type_a, type_b):
                 continue
+            if wall.length < door_width:
+                continue
+            if type_a == "room" and type_b == "room" and zone_rects is not None:
+                ra = zone_rects.get(a)
+                rb = zone_rects.get(b)
+                if ra is not None and rb is not None:
+                    ax0, ay0, aw0, ah0 = ra
+                    bx0, by0, bw0, bh0 = rb
+                    overlap_y0 = max(0.0, min(float(ay0 + ah0), float(by0 + bh0)) - max(float(ay0), float(by0)))
+                    overlap_x0 = max(0.0, min(float(ax0 + aw0), float(bx0 + bw0)) - max(float(ax0), float(bx0)))
+                    gap_x0 = 0.0
+                    if float(ax0 + aw0) <= float(bx0):
+                        gap_x0 = float(bx0) - float(ax0 + aw0)
+                    elif float(bx0 + bw0) <= float(ax0):
+                        gap_x0 = float(ax0) - float(bx0 + bw0)
+                    gap_y0 = 0.0
+                    if float(ay0 + ah0) <= float(by0):
+                        gap_y0 = float(by0) - float(ay0 + ah0)
+                    elif float(by0 + bh0) <= float(ay0):
+                        gap_y0 = float(ay0) - float(by0 + bh0)
+                    if (gap_x0 > 0.01 and overlap_y0 >= 0.5) or (gap_y0 > 0.01 and overlap_x0 >= 0.5):
+                        continue
             legal = (
                 ((type_a in ("room", "elevator_hall") and type_b == "corridor")) or
                 ((type_b in ("room", "elevator_hall") and type_a == "corridor")) or
+                (type_a == "staircase_hall" and type_b == "elevator_hall") or
+                (type_b == "staircase_hall" and type_a == "elevator_hall") or
                 (type_a == "staircase" and type_b == "elevator_hall") or
                 (type_b == "staircase" and type_a == "elevator_hall") or
                 (type_a == "corridor" and type_b == "core") or
@@ -827,8 +1091,7 @@ def generate_doors(
             if "core" in (type_a, type_b) and zone_rects is not None:
                 core_id = a if type_a == "core" else (b if type_b == "core" else None)
                 if core_id and core_id in zone_rects:
-                    _cx, cy, _cw, _ch = zone_rects[core_id]
-                    core_south = cy
+                    core_south = float(zone_rects[core_id][1])
                     x0, y0 = wall.geometry.coords[0]
                     x1, y1 = wall.geometry.coords[1]
                     if abs(y0 - y1) < abs(x0 - x1):
@@ -836,10 +1099,41 @@ def generate_doors(
                             continue
                     else:
                         continue
+        else:
+            if wall.length < door_width:
+                continue
 
         candidates.append(wall)
 
     used: set = set()
+    if zone_types is not None and hall_hall_walls:
+        chosen = max(hall_hall_walls, key=lambda w: w.length)
+        door_w = min(0.8, float(chosen.length) - 0.10)
+        if door_w >= 0.6:
+            try:
+                center_pt = chosen.geometry.interpolate(0.5, normalized=True)
+                coords = list(chosen.geometry.coords)
+                dx = float(coords[-1][0]) - float(coords[0][0])
+                dy = float(coords[-1][1]) - float(coords[0][1])
+                angle_rad = float(math.atan2(dy, dx))
+                rot_deg = float(math.degrees(angle_rad))
+                rot = 90.0 if abs(abs(rot_deg) - 90.0) <= 1e-3 else 0.0
+                nx, ny = (-dy, dx)
+                nlen = float(math.hypot(nx, ny))
+                forward = (nx / nlen, 0.0, ny / nlen) if nlen > 1e-3 else (1.0, 0.0, 0.0)
+                key = _wall_key(chosen)
+                used.add(key)
+                doors.append(DoorPlacement(
+                    position=(round(float(center_pt.x), 2), round(float(center_pt.y), 2)),
+                    width=round(float(door_w), 2),
+                    connects=list(chosen.room_ids),
+                    wall_type=chosen.type,
+                    rotation=round(float(rot), 2),
+                    thickness=float(chosen.thickness),
+                    forward=(float(forward[0]), 0.0, float(forward[2])),
+                ))
+            except Exception:
+                pass
 
     if zone_types is None:
         for wall in candidates:
@@ -890,13 +1184,35 @@ def generate_doors(
         ta = get_type(a)
         tb = get_type(b)
         p = None
-        w_override: Optional[float] = None
+        if (ta == "staircase_hall" and tb == "elevator_hall") or (ta == "elevator_hall" and tb == "staircase_hall"):
+            stair_id = a if ta == "staircase_hall" else b
+            hall_id = a if ta == "elevator_hall" else b
+            w = _core_hall_door_width(chosen)
+            if w is None:
+                continue
+            p = _door_point_staircase_hall_elevator_hall(chosen, stair_id, hall_id, w)
+            if p is None:
+                continue
+            key = _wall_key(chosen)
+            if key in used:
+                continue
+            used.add(key)
+            rot = _wall_rotation(chosen)
+            connects = list(chosen.room_ids)
+            doors.append(DoorPlacement(
+                position=(round(p[0], 2), round(p[1], 2)),
+                width=float(w),
+                connects=connects,
+                wall_type=chosen.type,
+                rotation=rot,
+                thickness=float(chosen.thickness),
+                forward=_door_forward(p, connects, rot),
+            ))
+            continue
         if (ta == "staircase" and tb == "elevator_hall") or (ta == "elevator_hall" and tb == "staircase"):
             stair_id = a if ta == "staircase" else b
             hall_id = a if ta == "elevator_hall" else b
-            pack = _door_point_staircase_elevator_hall(chosen, stair_id, hall_id)
-            if pack is not None:
-                p, w_override = pack
+            p = _door_point_staircase_elevator_hall(chosen, stair_id, hall_id)
         else:
             p = _door_point(chosen)
         if p is None:
@@ -909,7 +1225,7 @@ def generate_doors(
         connects = list(chosen.room_ids)
         doors.append(DoorPlacement(
             position=(round(p[0], 2), round(p[1], 2)),
-            width=float(w_override) if w_override is not None else door_width,
+            width=door_width,
             connects=connects,
             wall_type=chosen.type,
             rotation=rot,
@@ -946,7 +1262,7 @@ def generate_doors(
     staircase_id = None
     elevator_hall_id = None
     for zid, zt in zone_types.items():
-        if zt == "staircase" and staircase_id is None:
+        if zt in ("staircase_hall", "staircase") and staircase_id is None:
             staircase_id = zid
         elif zt == "elevator_hall" and elevator_hall_id is None:
             elevator_hall_id = zid
@@ -959,23 +1275,43 @@ def generate_doors(
                 forced.append(w)
         if forced:
             chosen = max(forced, key=lambda w: w.length)
-            pack = _door_point_staircase_elevator_hall(chosen, staircase_id, elevator_hall_id)
-            if pack is not None:
-                p, w_override = pack
-                key = _wall_key(chosen)
-                if key not in used:
-                    used.add(key)
-                    rot = _wall_rotation(chosen)
-                    connects = list(chosen.room_ids)
-                    doors.append(DoorPlacement(
-                        position=(round(p[0], 2), round(p[1], 2)),
-                        width=float(w_override) if w_override is not None else door_width,
-                        connects=connects,
-                        wall_type=chosen.type,
-                        rotation=rot,
-                        thickness=float(chosen.thickness),
-                        forward=_door_forward(p, connects, rot),
-                    ))
+            st = get_type(staircase_id)
+            if st == "staircase_hall":
+                w = _core_hall_door_width(chosen)
+                if w is not None:
+                    p = _door_point_staircase_hall_elevator_hall(chosen, staircase_id, elevator_hall_id, w)
+                    if p is not None:
+                        key = _wall_key(chosen)
+                        if key not in used:
+                            used.add(key)
+                            rot = _wall_rotation(chosen)
+                            connects = list(chosen.room_ids)
+                            doors.append(DoorPlacement(
+                                position=(round(p[0], 2), round(p[1], 2)),
+                                width=float(w),
+                                connects=connects,
+                                wall_type=chosen.type,
+                                rotation=rot,
+                                thickness=float(chosen.thickness),
+                                forward=_door_forward(p, connects, rot),
+                            ))
+            else:
+                p = _door_point_staircase_elevator_hall(chosen, staircase_id, elevator_hall_id)
+                if p is not None:
+                    key = _wall_key(chosen)
+                    if key not in used:
+                        used.add(key)
+                        rot = _wall_rotation(chosen)
+                        connects = list(chosen.room_ids)
+                        doors.append(DoorPlacement(
+                            position=(round(p[0], 2), round(p[1], 2)),
+                            width=door_width,
+                            connects=connects,
+                            wall_type=chosen.type,
+                            rotation=rot,
+                            thickness=float(chosen.thickness),
+                            forward=_door_forward(p, connects, rot),
+                        ))
 
     return doors
 
@@ -1202,6 +1538,12 @@ def postprocess_floor(
     rooms: list,
     floor_boundary: Polygon,
     corridors: Optional[list] = None,
+    is_ground_floor: bool = False,
+    walls: Optional[List[WallSegment]] = None,
+    zone_types: Optional[Dict[str, str]] = None,
+    zone_rects: Optional[Dict[str, Tuple[float, float, float, float]]] = None,
+    rooms_needing_window: Optional[Set[str]] = None,
+    floor_bounds: Optional[Tuple[float, float, float, float]] = None,
 ) -> PostprocessResult:
     """
     对单层布局执行完整后处理。
@@ -1214,34 +1556,260 @@ def postprocess_floor(
     Returns:
         PostprocessResult
     """
-    walls = generate_wall_mesh(
-        rooms=rooms,
-        corridors=corridors or [],
-        core_tube=None,
-        floor_boundary=floor_boundary,
-    )
-    doors = generate_doors(walls)
-    room_rects: Dict[str, Tuple[float, float, float, float]] = {}
-    zone_types: Dict[str, str] = {}
-    rooms_needing_window: Set[str] = set()
-    for r in rooms:
-        rid = getattr(r, "id", getattr(r, "room_id", "?"))
-        if not hasattr(r, "polygon") or r.polygon.is_empty:
-            continue
-        minx, miny, maxx, maxy = r.polygon.bounds
-        room_rects[rid] = (float(minx), float(miny), float(maxx - minx), float(maxy - miny))
-        zone_types[rid] = "room"
-        has_window = getattr(r, "has_window", False) or getattr(r, "needs_window", False)
-        if has_window:
-            rooms_needing_window.add(rid)
+    if walls is None:
+        walls = generate_wall_mesh(
+            rooms=rooms,
+            corridors=corridors or [],
+            core_tube=None,
+            floor_boundary=floor_boundary,
+        )
+
+    rr: Dict[str, Tuple[float, float, float, float]] = dict(zone_rects or {})
+    zt: Dict[str, str] = dict(zone_types or {})
+    rnw: Set[str] = set(rooms_needing_window or set())
+    if zone_rects is None or zone_types is None or rooms_needing_window is None:
+        for r in rooms:
+            rid = getattr(r, "id", getattr(r, "room_id", "?"))
+            if not hasattr(r, "polygon") or r.polygon.is_empty:
+                continue
+            minx, miny, maxx, maxy = r.polygon.bounds
+            rr[rid] = (float(minx), float(miny), float(maxx - minx), float(maxy - miny))
+            zt[rid] = zt.get(rid, "room")
+            has_window = getattr(r, "has_window", False) or getattr(r, "needs_window", False)
+            if has_window:
+                rnw.add(rid)
+        if corridors:
+            for c in corridors:
+                cid = getattr(c, "id", None)
+                poly = getattr(c, "polygon", None)
+                if cid and poly is not None and hasattr(poly, "is_empty") and (not poly.is_empty):
+                    minx, miny, maxx, maxy = poly.bounds
+                    rr[cid] = (float(minx), float(miny), float(maxx - minx), float(maxy - miny))
+                    zt[cid] = zt.get(cid, "corridor")
+
+    doors = generate_doors(walls, zone_types=zt or None, zone_rects=rr or None)
     exterior_thickness = next((w.thickness for w in walls if w.type == "exterior_wall"), 0.24)
     windows = generate_windows_from_floor_boundary(
-        room_rects=room_rects,
-        zone_types=zone_types,
-        rooms_needing_window=rooms_needing_window,
-        floor_bounds=floor_boundary.bounds,
+        room_rects=rr,
+        zone_types=zt,
+        rooms_needing_window=rnw,
+        floor_bounds=floor_bounds or floor_boundary.bounds,
         exterior_thickness=float(exterior_thickness),
     )
+
+    if is_ground_floor and zt and rr:
+        fminx, fminy, fmaxx, fmaxy = (floor_bounds or floor_boundary.bounds)
+        
+        
+        ext_thick = float(exterior_thickness)  # 墙厚 (0.24)
+        door_w = 1.0                           # 走廊通往外界的大门通常较宽，设为 1.2 (或 0.9)
+        
+        if ext_thick > 1e-6:
+            cm = door_w / 2 + 0.05
+            proximity = 0.25
+
+            corridor_ids = [rid for rid, t in zt.items() if t == "corridor" and rid in rr]
+
+            chosen: Optional[Tuple[str, str, float, float, float, float]] = None
+            right_candidates: List[Tuple[float, float, str, float, float, float, float]] = []
+            for cid in corridor_ids:
+                rx, ry, rw, rh = rr[cid]
+                right_gap = float(fmaxx) - float(rx + rw)
+                if right_gap <= proximity:
+                    right_candidates.append((float(rx + rw), float(rh), cid, float(rx), float(ry), float(rw), float(rh)))
+
+            right_candidates.sort(key=lambda t: (t[0], t[1]), reverse=True)
+            if right_candidates:
+                _, _, cid, rx, ry, rw, rh = right_candidates[0]
+                chosen = ("right", cid, rx, ry, rw, rh)
+            else:
+                other_candidates: List[Tuple[float, float, float, str, str, float, float, float, float]] = []
+                for cid in corridor_ids:
+                    rx, ry, rw, rh = rr[cid]
+                    left_gap = float(rx) - float(fminx)
+                    right_gap = float(fmaxx) - float(rx + rw)
+                    bottom_gap = float(ry) - float(fminy)
+                    top_gap = float(fmaxy) - float(ry + rh)
+                    gaps = [
+                        ("right", right_gap),
+                        ("top", top_gap),
+                        ("bottom", bottom_gap),
+                        ("left", left_gap),
+                    ]
+                    side, gap = min(gaps, key=lambda t: t[1])
+                    if float(gap) > proximity:
+                        continue
+                    side_score = {"right": 4.0, "top": 3.0, "bottom": 2.0, "left": 1.0}.get(side, 0.0)
+                    other_candidates.append((side_score, -float(gap), float(rw * rh), cid, side, float(rx), float(ry), float(rw), float(rh)))
+
+                other_candidates.sort(reverse=True)
+                if other_candidates:
+                    _, _, _, cid, side, rx, ry, rw, rh = other_candidates[0]
+                    chosen = (side, cid, rx, ry, rw, rh)
+
+            if chosen is not None:
+                side, corridor_id, rx, ry, rw, rh = chosen
+                if side in ("left", "right"):
+                    wall_len = float(rh)
+                    if wall_len >= (door_w + 0.1):
+                        # --- 修复 2：计算门在墙内的 X 轴中心点时，必须使用墙厚 (ext_thick) ---
+                        x = float(fminx) + ext_thick / 2 if side == "left" else float(fmaxx) - ext_thick / 2
+                        y_min = float(ry) + cm
+                        y_max = float(ry + rh) - cm
+                        if y_max >= y_min:
+                            y_mid = float(ry + rh / 2)
+                            y = min(max(y_mid, y_min), y_max)
+                            doors.append(DoorPlacement(
+                                position=(round(float(x), 2), round(float(y), 2)),
+                                width=door_w,  # --- 修复 3：传入真正的门宽 1.2 ---
+                                connects=[corridor_id, "__exterior__"],
+                                wall_type="exterior_wall",
+                                rotation=90.0,
+                                thickness=ext_thick,
+                                forward=(1.0, 0.0, 0.0),
+                            ))
+                else:
+                    wall_len = float(rw)
+                    if wall_len >= (door_w + 0.1):
+                        # --- 修复 4：计算门在墙内的 Y 轴中心点时，必须使用墙厚 (ext_thick) ---
+                        y = float(fminy) + ext_thick / 2 if side == "bottom" else float(fmaxy) - ext_thick / 2
+                        x_min = float(rx) + cm
+                        x_max = float(rx + rw) - cm
+                        if x_max >= x_min:
+                            x_mid = float(rx + rw / 2)
+                            x = min(max(x_mid, x_min), x_max)
+                            doors.append(DoorPlacement(
+                                position=(round(float(x), 2), round(float(y), 2)),
+                                width=door_w,  # --- 修复 5：传入真正的门宽 1.2 ---
+                                connects=[corridor_id, "__exterior__"],
+                                wall_type="exterior_wall",
+                                rotation=0.0,
+                                thickness=ext_thick,
+                                forward=(0.0, 0.0, 1.0),
+                            ))
+
+    if corridors:
+        corridor_cover_thickness = next((float(w.thickness) for w in walls if w.type == "partition_wall"), 0.12)
+
+        def _merge_intervals(intervals: List[Tuple[float, float]]) -> List[Tuple[float, float]]:
+            if not intervals:
+                return []
+            items = sorted((float(a), float(b)) for a, b in intervals if float(b) > float(a))
+            out: List[Tuple[float, float]] = []
+            cur_a, cur_b = items[0]
+            for a, b in items[1:]:
+                if a <= cur_b + 1e-3:
+                    cur_b = max(cur_b, b)
+                else:
+                    out.append((cur_a, cur_b))
+                    cur_a, cur_b = a, b
+            out.append((cur_a, cur_b))
+            return out
+
+        def _cover_intervals_horizontal(corridor_id: str, y_edge: float, x0: float, x1: float) -> List[Tuple[float, float]]:
+            intervals: List[Tuple[float, float]] = []
+            for w in walls:
+                if w.type not in ("partition_wall", "exterior_wall"):
+                    continue
+                if w.type == "partition_wall" and corridor_id not in (w.room_ids or []):
+                    continue
+                try:
+                    minx, miny, maxx, maxy = w.geometry.bounds
+                except Exception:
+                    continue
+                tol = max(0.08, float(getattr(w, "thickness", 0.0)) / 2)
+                if abs(((float(miny) + float(maxy)) / 2) - float(y_edge)) > tol:
+                    continue
+                a = max(float(x0), float(minx))
+                b = min(float(x1), float(maxx))
+                if b - a > 1e-3:
+                    intervals.append((a, b))
+            return _merge_intervals(intervals)
+
+        def _cover_intervals_vertical(corridor_id: str, x_edge: float, y0: float, y1: float) -> List[Tuple[float, float]]:
+            intervals: List[Tuple[float, float]] = []
+            for w in walls:
+                if w.type not in ("partition_wall", "exterior_wall"):
+                    continue
+                if w.type == "partition_wall" and corridor_id not in (w.room_ids or []):
+                    continue
+                try:
+                    minx, miny, maxx, maxy = w.geometry.bounds
+                except Exception:
+                    continue
+                tol = max(0.08, float(getattr(w, "thickness", 0.0)) / 2)
+                if abs(((float(minx) + float(maxx)) / 2) - float(x_edge)) > tol:
+                    continue
+                a = max(float(y0), float(miny))
+                b = min(float(y1), float(maxy))
+                if b - a > 1e-3:
+                    intervals.append((a, b))
+            return _merge_intervals(intervals)
+
+        def _fill_gaps_1d_horizontal(corridor_id: str, y_edge: float, x0: float, x1: float) -> None:
+            covered = _cover_intervals_horizontal(corridor_id, y_edge, x0, x1)
+            cur = float(x0)
+            for a, b in covered:
+                if a > cur + 1e-3:
+                    if float(a - cur) > 0.1:
+                        walls.append(WallSegment(
+                            type="partition_wall",
+                            geometry=LineString([(float(cur), float(y_edge)), (float(a), float(y_edge))]),
+                            thickness=float(corridor_cover_thickness),
+                            room_ids=[str(corridor_id)],
+                        ))
+                cur = max(cur, b)
+            if float(x1 - cur) > 0.1:
+                walls.append(WallSegment(
+                    type="partition_wall",
+                    geometry=LineString([(float(cur), float(y_edge)), (float(x1), float(y_edge))]),
+                    thickness=float(corridor_cover_thickness),
+                    room_ids=[str(corridor_id)],
+                ))
+
+        def _fill_gaps_1d_vertical(corridor_id: str, x_edge: float, y0: float, y1: float) -> None:
+            covered = _cover_intervals_vertical(corridor_id, x_edge, y0, y1)
+            cur = float(y0)
+            for a, b in covered:
+                if a > cur + 1e-3:
+                    if float(a - cur) > 0.1:
+                        walls.append(WallSegment(
+                            type="partition_wall",
+                            geometry=LineString([(float(x_edge), float(cur)), (float(x_edge), float(a))]),
+                            thickness=float(corridor_cover_thickness),
+                            room_ids=[str(corridor_id)],
+                        ))
+                cur = max(cur, b)
+            if float(y1 - cur) > 0.1:
+                walls.append(WallSegment(
+                    type="partition_wall",
+                    geometry=LineString([(float(x_edge), float(cur)), (float(x_edge), float(y1))]),
+                    thickness=float(corridor_cover_thickness),
+                    room_ids=[str(corridor_id)],
+                ))
+
+        for c in corridors or []:
+            corridor_id = getattr(c, "id", None) if not isinstance(c, dict) else c.get("id")
+            poly0 = getattr(c, "polygon", None) if not isinstance(c, dict) else c.get("polygon")
+            if not corridor_id:
+                continue
+            try:
+                if isinstance(poly0, Polygon):
+                    corridor_poly = poly0
+                elif isinstance(poly0, list):
+                    corridor_poly = Polygon(poly0)
+                else:
+                    continue
+                if corridor_poly.is_empty:
+                    continue
+                minx, miny, maxx, maxy = corridor_poly.bounds
+            except Exception:
+                continue
+
+            _fill_gaps_1d_horizontal(str(corridor_id), float(miny), float(minx), float(maxx))
+            _fill_gaps_1d_horizontal(str(corridor_id), float(maxy), float(minx), float(maxx))
+            _fill_gaps_1d_vertical(str(corridor_id), float(minx), float(miny), float(maxy))
+            _fill_gaps_1d_vertical(str(corridor_id), float(maxx), float(miny), float(maxy))
 
     return PostprocessResult(walls=walls, doors=doors, windows=windows)
 

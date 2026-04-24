@@ -48,6 +48,8 @@ Z_ORDER_MAP: Dict[str, int] = {
     "elevator_hall": 30,
     "elevator_shaft": 30,
     "staircase": 30,
+    "staircase_hall": 30,
+    "staircase_shaft": 30,
     "partition_wall": 80,
     "exterior_wall": 80,
     "wall": 80,
@@ -67,6 +69,8 @@ def _is_room_type(t: str) -> bool:
         "elevator_hall",
         "elevator_shaft",
         "staircase",
+        "staircase_hall",
+        "staircase_shaft",
         "partition_wall",
         "exterior_wall",
         "wall",
@@ -216,12 +220,20 @@ def _flatten_floor_to_elements(
     # Layer 4: core tube sub-areas (optional, keep as polygons if present)
     core = building_dict.get("core_tube") or {}
     if isinstance(core, dict):
-        for key, etype in (
-            ("staircase", "staircase"),
+        primary = (
+            ("staircase_hall", "staircase_hall"),
+            ("staircase_shaft", "staircase_shaft"),
             ("elevator_hall", "elevator_hall"),
             ("elevator_shaft", "elevator_shaft"),
+        )
+        fallback = (
+            ("staircase", "staircase"),
             ("elevator", "elevator"),
-        ):
+        )
+        pairs = list(primary)
+        if not all(isinstance(core.get(k), dict) for k, _ in primary):
+            pairs.extend(fallback)
+        for key, etype in pairs:
             info = core.get(key)
             if not isinstance(info, dict):
                 continue
@@ -230,6 +242,12 @@ def _flatten_floor_to_elements(
             if b is None:
                 continue
             minx, miny, maxx, maxy = b
+            fwd = info.get("forward")
+            forward = (
+                [float(fwd[0]), float(fwd[1]), float(fwd[2])]
+                if isinstance(fwd, (list, tuple)) and len(fwd) == 3
+                else None
+            )
             elements.append({
                 "id": f"{floor_id}_{etype}",
                 "type": etype,
@@ -238,6 +256,7 @@ def _flatten_floor_to_elements(
                 "y": round(miny, 2),
                 "width": round(maxx - minx, 2),
                 "height": round(maxy - miny, 2),
+                "forward": forward,
                 "zOrder": _zorder_for(etype),
             })
 
