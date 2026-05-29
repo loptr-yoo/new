@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 import math
 from dataclasses import dataclass, field
-from typing import Dict, FrozenSet, List, Optional, Set, Tuple
+from typing import Any, Dict, FrozenSet, List, Optional, Set, Tuple
 
 import numpy as np
 from shapely.geometry import (
@@ -22,12 +22,168 @@ from shapely.geometry import (
     LinearRing,
     MultiLineString,
     MultiPolygon,
+    Point,
     Polygon,
     box,
 )
 from shapely.geometry.base import BaseGeometry
 
 logger = logging.getLogger(__name__)
+
+try:
+    from shapely.validation import make_valid  # type: ignore[attr-defined]
+except Exception:  # pragma: no cover
+    make_valid = None  # type: ignore[assignment]
+
+
+def _largest_polygon(g: BaseGeometry) -> Optional[Polygon]:
+    if g is None or g.is_empty:
+        return None
+    if isinstance(g, Polygon):
+        return g
+    if isinstance(g, MultiPolygon):
+        polys = [p for p in g.geoms if isinstance(p, Polygon) and (not p.is_empty)]
+        return max(polys, key=lambda p: float(p.area)) if polys else None
+    if isinstance(g, GeometryCollection):
+        polys = [p for p in g.geoms if isinstance(p, Polygon) and (not p.is_empty)]
+        return max(polys, key=lambda p: float(p.area)) if polys else None
+    return None
+
+
+def _round_polygon(poly: Polygon, round_digits: int) -> Optional[Polygon]:
+    if poly is None or poly.is_empty:
+        return None
+    try:
+        coords = [(round(float(x), round_digits), round(float(y), round_digits)) for x, y in poly.exterior.coords]
+        p2 = Polygon(coords)
+        if (not p2.is_valid) and make_valid is not None:
+            fixed = make_valid(p2)
+            best = _largest_polygon(fixed) if fixed is not None else None
+            if best is not None:
+                p2 = best
+        return p2 if (p2 is not None and (not p2.is_empty)) else None
+    except Exception:
+        return poly
+
+
+def fuse_dummy_to_corridor(
+    *,
+    rooms: List[Any],
+    corridors: List[Any],
+    eps: float = 1e-4,
+    round_digits: int = 4,
+) -> Tuple[List[Any], List[Any], List[str]]:
+    if not rooms or not corridors:
+        return list(rooms), list(corridors), []
+
+    corridor_copies: List[Any] = []
+    for c in corridors:
+        try:
+            c2 = c.__class__(
+                id=getattr(c, "id"),
+                centerline=getattr(c, "centerline"),
+                width=getattr(c, "width"),
+                orientation=getattr(c, "orientation"),
+            )
+            c2.polygon = getattr(c, "polygon")
+            corridor_copies.append(c2)
+        except Exception:
+            corridor_copies.append(c)
+
+    warnings: List[str] = []
+    remaining_rooms: List[Any] = list(rooms)
+
+    def _iter_dummy_ids() -> List[str]:
+        out = []
+        for r in remaining_rooms:
+            if bool(getattr(r, "is_dummy", False)) and (not bool(getattr(r, "skip_solver", False))):
+                rid = getattr(r, "id", getattr(r, "room_id", None))
+                if rid:
+                    out.append(str(rid))
+        return out
+
+    while True:
+        fused_any = False
+        to_fuse: Dict[str, List[Any]] = {}
+        for r in list(remaining_rooms):
+            if not bool(getattr(r, "is_dummy", False)):
+                continue
+            if bool(getattr(r, "skip_solver", False)):
+                continue
+            poly = getattr(r, "polygon", None)
+            if poly is None or poly.is_empty:
+                continue
+
+            best_idx = None
+            best_score = 0.0
+            for i, c in enumerate(corridor_copies):
+                cpoly = getattr(c, "polygon", None)
+                if cpoly is None or cpoly.is_empty:
+                    continue
+                try:
+                    if not poly.intersects(cpoly.buffer(float(eps))):
+                        continue
+                    hit = poly.intersection(cpoly.buffer(float(eps)))
+                    score = float(getattr(hit, "area", 0.0)) + float(getattr(hit, "length", 0.0)) * float(eps)
+                except Exception:
+                    continue
+                if score > best_score:
+                    best_score = score
+                    best_idx = i
+
+            if best_idx is None:
+                continue
+
+            cid = str(getattr(corridor_copies[best_idx], "id", best_idx))
+            to_fuse.setdefault(cid, []).append(r)
+
+        if not to_fuse:
+            break
+
+        fused_ids: Set[str] = set()
+        for c in corridor_copies:
+            cid = str(getattr(c, "id", ""))
+            if cid not in to_fuse:
+                continue
+            cpoly = getattr(c, "polygon", None)
+            if cpoly is None or cpoly.is_empty:
+                continue
+            g: BaseGeometry = cpoly
+            for r in to_fuse[cid]:
+                poly = getattr(r, "polygon", None)
+                if poly is None or poly.is_empty:
+                    continue
+                try:
+                    g = g.union(poly)
+                except Exception:
+                    continue
+                rid = getattr(r, "id", getattr(r, "room_id", None))
+                if rid:
+                    fused_ids.add(str(rid))
+
+            p = _largest_polygon(g)
+            if p is None:
+                continue
+            try:
+                p = p.buffer(float(eps)).buffer(-float(eps)).buffer(0)
+            except Exception:
+                pass
+            p2 = _round_polygon(p, int(round_digits))
+            if p2 is not None and (not p2.is_empty):
+                c.polygon = p2
+
+        if fused_ids:
+            fused_any = True
+            warnings.append(f"Fused dummy rooms into corridor: {sorted(fused_ids)}")
+            remaining_rooms = [
+                r for r in remaining_rooms
+                if str(getattr(r, "id", getattr(r, "room_id", ""))) not in fused_ids
+            ]
+
+        if not fused_any:
+            break
+
+    return remaining_rooms, corridor_copies, warnings
 
 
 # ============================================================
@@ -56,7 +212,7 @@ class DoorPlacement:
     wall_type: str  # 所在墙的类型
     rotation: float = 0.0  # 0=水平墙, 90=垂直墙
     thickness: float = 0.12  # 米
-    forward: Tuple[float, float, float] = (0.0, 0.0, 1.0)
+    forward: Tuple[float, float, float] = (0.0, 1.0, 0.0)
 
 
 @dataclass
@@ -68,7 +224,7 @@ class WindowPlacement:
     wall_length: float  # 所在墙段长度
     rotation: float = 0.0  # 0=水平墙, 90=垂直墙
     thickness: float = 0.24  # 米
-    forward: Tuple[float, float, float] = (0.0, 0.0, 1.0)
+    forward: Tuple[float, float, float] = (0.0, 1.0, 0.0)
 
 
 @dataclass
@@ -669,13 +825,31 @@ def generate_wall_mesh(
     all_zones = []
     for room in rooms:
         rid = getattr(room, "id", getattr(room, "room_id", "?"))
+        rtype = str(getattr(room, "room_type", getattr(room, "type", "")) or "").lower()
+        if rtype == "void" or bool(getattr(room, "skip_solver", False)):
+            continue
         if hasattr(room, "polygon") and not room.polygon.is_empty:
             all_zones.append(("room", rid, room.polygon))
     for corridor in (corridors or []):
         if hasattr(corridor, "polygon") and not corridor.polygon.is_empty:
             all_zones.append(("corridor", corridor.id, corridor.polygon))
     if core_tube and hasattr(core_tube, "polygon") and not core_tube.polygon.is_empty:
-        all_zones.append(("core", "core_tube", core_tube.polygon))
+        subzones = [
+            ("core", "core_staircase_hall", getattr(core_tube, "staircase_hall", None)),
+            ("core", "core_staircase_hall_b", getattr(core_tube, "staircase_hall_b", None)),
+            ("core", "core_staircase_shaft", getattr(core_tube, "staircase_shaft", None)),
+            ("core", "core_elevator_hall", getattr(core_tube, "elevator_hall", None)),
+            ("core", "core_elevator_hall_b", getattr(core_tube, "elevator_hall_b", None)),
+            ("core", "core_elevator_shaft", getattr(core_tube, "elevator_shaft", None)),
+        ]
+        used = False
+        for _, zid, poly in subzones:
+            if poly is None or getattr(poly, "is_empty", True):
+                continue
+            all_zones.append(("core", str(zid), poly))
+            used = True
+        if not used:
+            all_zones.append(("core", "core_tube", core_tube.polygon))
 
     walls: List[WallSegment] = []
     walls.extend(_generate_exterior_wall_pieces(floor_boundary, exterior_thickness))
@@ -742,6 +916,193 @@ def _dedup_walls(walls: List[WallSegment]) -> List[WallSegment]:
     return result
 
 
+def _normalize_walls(
+    walls: List[WallSegment],
+    *,
+    floor_bounds: Tuple[float, float, float, float],
+    zone_rects: Optional[Dict[str, Tuple[float, float, float, float]]] = None,
+) -> List[WallSegment]:
+    grid_x: List[float] = [float(floor_bounds[0]), float(floor_bounds[2])]
+    grid_y: List[float] = [float(floor_bounds[1]), float(floor_bounds[3])]
+    if zone_rects:
+        for x, y, w, h in zone_rects.values():
+            grid_x.extend([float(x), float(x + w)])
+            grid_y.extend([float(y), float(y + h)])
+    grid_x = sorted({round(float(v), 4) for v in grid_x})
+    grid_y = sorted({round(float(v), 4) for v in grid_y})
+
+    def _snap_axis(val: float, grid: List[float], tol: float) -> float:
+        if not grid:
+            return float(val)
+        nearest = min(grid, key=lambda g: abs(float(g) - float(val)))
+        return float(nearest) if abs(float(nearest) - float(val)) <= float(tol) else float(val)
+
+    def _axis_align(line: LineString) -> LineString:
+        coords = list(line.coords)
+        if len(coords) < 2:
+            return line
+        (x1, y1), (x2, y2) = coords[0], coords[-1]
+        dx = abs(float(x2) - float(x1))
+        dy = abs(float(y2) - float(y1))
+        eps = 0.05
+        if dx <= dy and dx < eps:
+            sx = _snap_axis((float(x1) + float(x2)) / 2.0, grid_x, tol=0.12)
+            return LineString([(sx, float(y1)), (sx, float(y2))])
+        if dy < dx and dy < eps:
+            sy = _snap_axis((float(y1) + float(y2)) / 2.0, grid_y, tol=0.12)
+            return LineString([(float(x1), sy), (float(x2), sy)])
+        return line
+
+    lines: List[WallSegment] = []
+    others: List[WallSegment] = []
+    for w in walls:
+        if isinstance(w.geometry, LineString):
+            try:
+                g = _axis_align(w.geometry)
+                lines.append(WallSegment(type=w.type, geometry=g, thickness=w.thickness, room_ids=list(w.room_ids)))
+            except Exception:
+                lines.append(w)
+        else:
+            others.append(w)
+
+    snap_tol = 0.05
+    pts: List[Tuple[float, float]] = []
+    for w in lines:
+        coords = list(w.geometry.coords)
+        if len(coords) >= 2:
+            pts.append((float(coords[0][0]), float(coords[0][1])))
+            pts.append((float(coords[-1][0]), float(coords[-1][1])))
+
+    clusters: List[List[Tuple[float, float]]] = []
+    for x, y in pts:
+        placed = False
+        for c in clusters:
+            cx, cy = c[0]
+            if (x - cx) * (x - cx) + (y - cy) * (y - cy) <= snap_tol * snap_tol:
+                c.append((x, y))
+                placed = True
+                break
+        if not placed:
+            clusters.append([(x, y)])
+
+    mapping: Dict[Tuple[float, float], Tuple[float, float]] = {}
+    for c in clusters:
+        mx = sum(p[0] for p in c) / len(c)
+        my = sum(p[1] for p in c) / len(c)
+        mx = _snap_axis(mx, grid_x, tol=snap_tol)
+        my = _snap_axis(my, grid_y, tol=snap_tol)
+        mx = round(float(mx), 4)
+        my = round(float(my), 4)
+        for p in c:
+            mapping[(round(float(p[0]), 4), round(float(p[1]), 4))] = (mx, my)
+
+    snapped: List[WallSegment] = []
+    for w in lines:
+        coords = list(w.geometry.coords)
+        if len(coords) < 2:
+            snapped.append(w)
+            continue
+        a = (round(float(coords[0][0]), 4), round(float(coords[0][1]), 4))
+        b = (round(float(coords[-1][0]), 4), round(float(coords[-1][1]), 4))
+        a2 = mapping.get(a, a)
+        b2 = mapping.get(b, b)
+        g = LineString([a2, b2])
+        snapped.append(WallSegment(type=w.type, geometry=g, thickness=w.thickness, room_ids=list(w.room_ids)))
+
+    merged: List[WallSegment] = []
+    buckets: Dict[Tuple, List[WallSegment]] = {}
+    for w in snapped:
+        if not isinstance(w.geometry, LineString):
+            merged.append(w)
+            continue
+        coords = list(w.geometry.coords)
+        if len(coords) < 2:
+            merged.append(w)
+            continue
+        (x1, y1), (x2, y2) = coords[0], coords[-1]
+        dx = abs(float(x2) - float(x1))
+        dy = abs(float(y2) - float(y1))
+        if dx <= dy:
+            key = (w.type, round(float(w.thickness), 3), frozenset(w.room_ids), "v", round(float(x1), 4))
+        else:
+            key = (w.type, round(float(w.thickness), 3), frozenset(w.room_ids), "h", round(float(y1), 4))
+        buckets.setdefault(key, []).append(w)
+
+    for key, segs in buckets.items():
+        _, thick, room_ids, orient, cst = key
+        if orient == "v":
+            intervals = []
+            for w in segs:
+                y0 = float(min(w.geometry.coords[0][1], w.geometry.coords[-1][1]))
+                y1 = float(max(w.geometry.coords[0][1], w.geometry.coords[-1][1]))
+                intervals.append((y0, y1))
+            intervals.sort()
+            out = []
+            cur0, cur1 = intervals[0]
+            for a0, a1 in intervals[1:]:
+                if a0 <= cur1 + 1e-3:
+                    cur1 = max(cur1, a1)
+                else:
+                    out.append((cur0, cur1))
+                    cur0, cur1 = a0, a1
+            out.append((cur0, cur1))
+            for a0, a1 in out:
+                g = LineString([(float(cst), float(a0)), (float(cst), float(a1))])
+                if g.length > 0.02:
+                    merged.append(WallSegment(type=key[0], geometry=g, thickness=float(thick), room_ids=list(room_ids)))
+        else:
+            intervals = []
+            for w in segs:
+                x0 = float(min(w.geometry.coords[0][0], w.geometry.coords[-1][0]))
+                x1 = float(max(w.geometry.coords[0][0], w.geometry.coords[-1][0]))
+                intervals.append((x0, x1))
+            intervals.sort()
+            out = []
+            cur0, cur1 = intervals[0]
+            for a0, a1 in intervals[1:]:
+                if a0 <= cur1 + 1e-3:
+                    cur1 = max(cur1, a1)
+                else:
+                    out.append((cur0, cur1))
+                    cur0, cur1 = a0, a1
+            out.append((cur0, cur1))
+            for a0, a1 in out:
+                g = LineString([(float(a0), float(cst)), (float(a1), float(cst))])
+                if g.length > 0.02:
+                    merged.append(WallSegment(type=key[0], geometry=g, thickness=float(thick), room_ids=list(room_ids)))
+
+    merged = _dedup_walls(merged) + others
+
+    degrees: Dict[Tuple[float, float], int] = {}
+    for w in merged:
+        if not isinstance(w.geometry, LineString) or w.type != "partition_wall":
+            continue
+        coords = list(w.geometry.coords)
+        if len(coords) < 2:
+            continue
+        a = (round(float(coords[0][0]), 4), round(float(coords[0][1]), 4))
+        b = (round(float(coords[-1][0]), 4), round(float(coords[-1][1]), 4))
+        degrees[a] = degrees.get(a, 0) + 1
+        degrees[b] = degrees.get(b, 0) + 1
+
+    pruned: List[WallSegment] = []
+    for w in merged:
+        if not isinstance(w.geometry, LineString) or w.type != "partition_wall":
+            pruned.append(w)
+            continue
+        coords = list(w.geometry.coords)
+        if len(coords) < 2:
+            pruned.append(w)
+            continue
+        a = (round(float(coords[0][0]), 4), round(float(coords[0][1]), 4))
+        b = (round(float(coords[-1][0]), 4), round(float(coords[-1][1]), 4))
+        if degrees.get(a, 0) <= 1 and degrees.get(b, 0) <= 1 and float(w.geometry.length) < 0.2:
+            continue
+        pruned.append(w)
+
+    return _dedup_walls(pruned)
+
+
 # ============================================================
 # 墙体方向判断
 # ============================================================
@@ -785,11 +1146,15 @@ def generate_doors(
     """
     doors: List[DoorPlacement] = []
 
+    dummy_prefix = "room_dummy_"
+
     def _is_door_space(zt: str) -> bool:
         return zt in ("room", "staircase", "staircase_hall", "elevator_hall")
 
     def get_type(zid: str) -> str:
         zt_lower = zid.lower()
+        if zt_lower.startswith(dummy_prefix):
+            return "dummy"
         if zone_types is not None and zid in zone_types:
             return zone_types.get(zid, "room")
         if "corridor" in zt_lower:
@@ -812,7 +1177,7 @@ def generate_doors(
     def _default_forward(rotation: float) -> Tuple[float, float, float]:
         if abs(float(rotation) - 90.0) < 1e-6:
             return (1.0, 0.0, 0.0)
-        return (0.0, 0.0, 1.0)
+        return (0.0, 1.0, 0.0)
 
     def _door_forward(_pos: Tuple[float, float], connects: List[str], rotation: float) -> Tuple[float, float, float]:
         if zone_types is None or zone_rects is None or len(connects) != 2:
@@ -838,7 +1203,7 @@ def generate_doors(
         if c_from is None or c_to is None:
             return _default_forward(rotation)
         dx, dy = _normalize_2d(float(c_to[0]) - float(c_from[0]), float(c_to[1]) - float(c_from[1]))
-        return (float(dx), 0.0, float(dy))
+        return (float(dx), float(dy), 0.0)
 
     def _door_point_with_width(wall: WallSegment, w: float) -> Optional[Tuple[float, float]]:
         if wall.length < (float(w) + 2 * margin):
@@ -1045,6 +1410,13 @@ def generate_doors(
             a, b = wall.room_ids[0], wall.room_ids[1]
             type_a = get_type(a)
             type_b = get_type(b)
+            if "dummy" in (type_a, type_b):
+                other = type_b if type_a == "dummy" else type_a
+                if other != "corridor":
+                    continue
+                min_len = max(1.0, float(door_width))
+                if wall.length < min_len:
+                    continue
             if (type_a == "staircase_hall" and type_b == "elevator_hall") or (type_b == "staircase_hall" and type_a == "elevator_hall"):
                 if wall.length >= 0.6:
                     hall_hall_walls.append(wall)
@@ -1076,8 +1448,8 @@ def generate_doors(
                     if (gap_x0 > 0.01 and overlap_y0 >= 0.5) or (gap_y0 > 0.01 and overlap_x0 >= 0.5):
                         continue
             legal = (
-                ((type_a in ("room", "elevator_hall") and type_b == "corridor")) or
-                ((type_b in ("room", "elevator_hall") and type_a == "corridor")) or
+                ((type_a in ("room", "elevator_hall", "dummy") and type_b == "corridor")) or
+                ((type_b in ("room", "elevator_hall", "dummy") and type_a == "corridor")) or
                 (type_a == "staircase_hall" and type_b == "elevator_hall") or
                 (type_b == "staircase_hall" and type_a == "elevator_hall") or
                 (type_a == "staircase" and type_b == "elevator_hall") or
@@ -1120,7 +1492,7 @@ def generate_doors(
                 rot = 90.0 if abs(abs(rot_deg) - 90.0) <= 1e-3 else 0.0
                 nx, ny = (-dy, dx)
                 nlen = float(math.hypot(nx, ny))
-                forward = (nx / nlen, 0.0, ny / nlen) if nlen > 1e-3 else (1.0, 0.0, 0.0)
+                forward = (nx / nlen, ny / nlen, 0.0) if nlen > 1e-3 else (1.0, 0.0, 0.0)
                 key = _wall_key(chosen)
                 used.add(key)
                 doors.append(DoorPlacement(
@@ -1130,7 +1502,7 @@ def generate_doors(
                     wall_type=chosen.type,
                     rotation=round(float(rot), 2),
                     thickness=float(chosen.thickness),
-                    forward=(float(forward[0]), 0.0, float(forward[2])),
+                    forward=(float(forward[0]), float(forward[1]), 0.0),
                 ))
             except Exception:
                 pass
@@ -1435,7 +1807,7 @@ def generate_windows_from_exterior_walls(
                 wall_length=round(wall_len, 2),
                 rotation=rot,
                 thickness=float(wall.thickness),
-                forward=(float(fx), 0.0, float(fy)),
+                forward=(float(fx), float(fy), 0.0),
             ))
 
     return windows
@@ -1501,7 +1873,7 @@ def generate_windows_from_floor_boundary(
                     wall_length=round(float(wall_len), 2),
                     rotation=90.0,
                     thickness=float(exterior_thickness),
-                    forward=(float(fx), 0.0, float(fy)),
+                    forward=(float(fx), float(fy), 0.0),
                 ))
         else:
             y = (fminy + t / 2) if side == "bottom" else (fmaxy - t / 2)
@@ -1524,7 +1896,7 @@ def generate_windows_from_floor_boundary(
                     wall_length=round(float(wall_len), 2),
                     rotation=0.0,
                     thickness=float(exterior_thickness),
-                    forward=(float(fx), 0.0, float(fy)),
+                    forward=(float(fx), float(fy), 0.0),
                 ))
 
     return windows
@@ -1570,6 +1942,9 @@ def postprocess_floor(
     if zone_rects is None or zone_types is None or rooms_needing_window is None:
         for r in rooms:
             rid = getattr(r, "id", getattr(r, "room_id", "?"))
+            rtype = str(getattr(r, "room_type", getattr(r, "type", "")) or "").lower()
+            if rtype == "void" or bool(getattr(r, "skip_solver", False)):
+                continue
             if not hasattr(r, "polygon") or r.polygon.is_empty:
                 continue
             minx, miny, maxx, maxy = r.polygon.bounds
@@ -1587,6 +1962,56 @@ def postprocess_floor(
                     rr[cid] = (float(minx), float(miny), float(maxx - minx), float(maxy - miny))
                     zt[cid] = zt.get(cid, "corridor")
 
+    for r in rooms:
+        rid = getattr(r, "id", getattr(r, "room_id", "?"))
+        rtype = str(getattr(r, "room_type", getattr(r, "type", "")) or "").lower()
+        if rtype == "void" or bool(getattr(r, "skip_solver", False)):
+            rr.pop(rid, None)
+            zt.pop(rid, None)
+            if rid in rnw:
+                rnw.remove(rid)
+
+    try:
+        fminx, fminy, fmaxx, fmaxy = (floor_bounds or floor_boundary.bounds)
+    except Exception:
+        fminx, fminy, fmaxx, fmaxy = floor_boundary.bounds
+
+    partition_thickness = next((float(w.thickness) for w in walls if w.type == "partition_wall"), 0.12)
+    void_walls: List[WallSegment] = []
+    for r in rooms:
+        rid = getattr(r, "id", getattr(r, "room_id", "?"))
+        rtype = str(getattr(r, "room_type", getattr(r, "type", "")) or "").lower()
+        if rtype != "void" and (not bool(getattr(r, "skip_solver", False))):
+            continue
+        poly = getattr(r, "polygon", None)
+        if poly is None or poly.is_empty:
+            continue
+        try:
+            ring = poly.exterior
+        except Exception:
+            continue
+        for seg in _extract_linestrings(ring):
+            minx, miny, maxx, maxy = seg.bounds
+            if (abs(float(minx) - float(maxx)) <= 1e-6) and (
+                abs(float(minx) - float(fminx)) <= 0.02 or abs(float(minx) - float(fmaxx)) <= 0.02
+            ):
+                continue
+            if (abs(float(miny) - float(maxy)) <= 1e-6) and (
+                abs(float(miny) - float(fminy)) <= 0.02 or abs(float(miny) - float(fmaxy)) <= 0.02
+            ):
+                continue
+            if seg.length <= 0.05:
+                continue
+            void_walls.append(WallSegment(
+                type="partition_wall",
+                geometry=seg,
+                thickness=partition_thickness,
+                room_ids=[str(rid)],
+            ))
+    if void_walls:
+        walls = list(walls) + void_walls
+    walls = _normalize_walls(walls, floor_bounds=(fminx, fminy, fmaxx, fmaxy), zone_rects=rr)
+
     doors = generate_doors(walls, zone_types=zt or None, zone_rects=rr or None)
     exterior_thickness = next((w.thickness for w in walls if w.type == "exterior_wall"), 0.24)
     windows = generate_windows_from_floor_boundary(
@@ -1601,8 +2026,8 @@ def postprocess_floor(
         fminx, fminy, fmaxx, fmaxy = (floor_bounds or floor_boundary.bounds)
         
         
-        ext_thick = float(exterior_thickness)  # 墙厚 (0.24)
-        door_w = 1.0                           # 走廊通往外界的大门通常较宽，设为 1.2 (或 0.9)
+        ext_thick = float(exterior_thickness)
+        door_w = 1.0
         
         if ext_thick > 1e-6:
             cm = door_w / 2 + 0.05
@@ -1611,41 +2036,95 @@ def postprocess_floor(
             corridor_ids = [rid for rid, t in zt.items() if t == "corridor" and rid in rr]
 
             chosen: Optional[Tuple[str, str, float, float, float, float]] = None
-            right_candidates: List[Tuple[float, float, str, float, float, float, float]] = []
-            for cid in corridor_ids:
-                rx, ry, rw, rh = rr[cid]
-                right_gap = float(fmaxx) - float(rx + rw)
-                if right_gap <= proximity:
-                    right_candidates.append((float(rx + rw), float(rh), cid, float(rx), float(ry), float(rw), float(rh)))
+            corridor_poly_by_id: Dict[str, Polygon] = {}
+            if corridors:
+                for c in corridors:
+                    cid0 = getattr(c, "id", None) if not isinstance(c, dict) else c.get("id")
+                    poly0 = getattr(c, "polygon", None) if not isinstance(c, dict) else c.get("polygon")
+                    if not cid0 or poly0 is None:
+                        continue
+                    try:
+                        if isinstance(poly0, Polygon):
+                            poly = poly0
+                        else:
+                            poly = Polygon(poly0)
+                        if not poly.is_empty:
+                            corridor_poly_by_id[str(cid0)] = poly
+                    except Exception:
+                        continue
 
-            right_candidates.sort(key=lambda t: (t[0], t[1]), reverse=True)
-            if right_candidates:
-                _, _, cid, rx, ry, rw, rh = right_candidates[0]
-                chosen = ("right", cid, rx, ry, rw, rh)
-            else:
-                other_candidates: List[Tuple[float, float, float, str, str, float, float, float, float]] = []
+            if corridor_poly_by_id and corridor_ids:
+                wall_lines = {
+                    "right": LineString([(float(fmaxx), float(fminy)), (float(fmaxx), float(fmaxy))]),
+                    "left": LineString([(float(fminx), float(fminy)), (float(fminx), float(fmaxy))]),
+                    "top": LineString([(float(fminx), float(fmaxy)), (float(fmaxx), float(fmaxy))]),
+                    "bottom": LineString([(float(fminx), float(fminy)), (float(fmaxx), float(fminy))]),
+                }
+                best_len = 0.0
+                best_tuple: Optional[Tuple[str, str, float, float, float, float]] = None
+                for cid in corridor_ids:
+                    poly = corridor_poly_by_id.get(str(cid))
+                    if poly is None or poly.is_empty:
+                        continue
+                    for side, wl in wall_lines.items():
+                        try:
+                            hit = poly.intersection(wl.buffer(float(proximity)))
+                            hit_len = float(getattr(hit, "length", 0.0))
+                        except Exception:
+                            continue
+                        if hit_len > best_len + 1e-6:
+                            rx, ry, rw, rh = rr[cid]
+                            try:
+                                hminx, hminy, hmaxx, hmaxy = (float(v) for v in hit.bounds)
+                                if side in ("left", "right"):
+                                    ry = float(hminy)
+                                    rh = float(hmaxy - hminy)
+                                else:
+                                    rx = float(hminx)
+                                    rw = float(hmaxx - hminx)
+                            except Exception:
+                                pass
+                            best_len = hit_len
+                            best_tuple = (side, str(cid), float(rx), float(ry), float(rw), float(rh))
+                if best_tuple is not None and best_len >= float(door_w) + 0.1:
+                    chosen = best_tuple
+
+            if chosen is None:
+                right_candidates: List[Tuple[float, float, str, float, float, float, float]] = []
                 for cid in corridor_ids:
                     rx, ry, rw, rh = rr[cid]
-                    left_gap = float(rx) - float(fminx)
                     right_gap = float(fmaxx) - float(rx + rw)
-                    bottom_gap = float(ry) - float(fminy)
-                    top_gap = float(fmaxy) - float(ry + rh)
-                    gaps = [
-                        ("right", right_gap),
-                        ("top", top_gap),
-                        ("bottom", bottom_gap),
-                        ("left", left_gap),
-                    ]
-                    side, gap = min(gaps, key=lambda t: t[1])
-                    if float(gap) > proximity:
-                        continue
-                    side_score = {"right": 4.0, "top": 3.0, "bottom": 2.0, "left": 1.0}.get(side, 0.0)
-                    other_candidates.append((side_score, -float(gap), float(rw * rh), cid, side, float(rx), float(ry), float(rw), float(rh)))
+                    if right_gap <= proximity:
+                        right_candidates.append((float(rx + rw), float(rh), cid, float(rx), float(ry), float(rw), float(rh)))
 
-                other_candidates.sort(reverse=True)
-                if other_candidates:
-                    _, _, _, cid, side, rx, ry, rw, rh = other_candidates[0]
-                    chosen = (side, cid, rx, ry, rw, rh)
+                right_candidates.sort(key=lambda t: (t[0], t[1]), reverse=True)
+                if right_candidates:
+                    _, _, cid, rx, ry, rw, rh = right_candidates[0]
+                    chosen = ("right", cid, rx, ry, rw, rh)
+                else:
+                    other_candidates: List[Tuple[float, float, float, str, str, float, float, float, float]] = []
+                    for cid in corridor_ids:
+                        rx, ry, rw, rh = rr[cid]
+                        left_gap = float(rx) - float(fminx)
+                        right_gap = float(fmaxx) - float(rx + rw)
+                        bottom_gap = float(ry) - float(fminy)
+                        top_gap = float(fmaxy) - float(ry + rh)
+                        gaps = [
+                            ("right", right_gap),
+                            ("top", top_gap),
+                            ("bottom", bottom_gap),
+                            ("left", left_gap),
+                        ]
+                        side, gap = min(gaps, key=lambda t: t[1])
+                        if float(gap) > proximity:
+                            continue
+                        side_score = {"right": 4.0, "top": 3.0, "bottom": 2.0, "left": 1.0}.get(side, 0.0)
+                        other_candidates.append((side_score, -float(gap), float(rw * rh), cid, side, float(rx), float(ry), float(rw), float(rh)))
+
+                    other_candidates.sort(reverse=True)
+                    if other_candidates:
+                        _, _, _, cid, side, rx, ry, rw, rh = other_candidates[0]
+                        chosen = (side, cid, rx, ry, rw, rh)
 
             if chosen is not None:
                 side, corridor_id, rx, ry, rw, rh = chosen
@@ -1685,7 +2164,7 @@ def postprocess_floor(
                                 wall_type="exterior_wall",
                                 rotation=0.0,
                                 thickness=ext_thick,
-                                forward=(0.0, 0.0, 1.0),
+                                forward=(0.0, 1.0, 0.0),
                             ))
 
     if corridors:
@@ -1706,87 +2185,163 @@ def postprocess_floor(
             out.append((cur_a, cur_b))
             return out
 
-        def _cover_intervals_horizontal(corridor_id: str, y_edge: float, x0: float, x1: float) -> List[Tuple[float, float]]:
+        def _append_projected_intervals(geom: BaseGeometry, orientation: str, a0: float, a1: float, out: List[Tuple[float, float]]) -> None:
+            if geom.is_empty:
+                return
+            if isinstance(geom, (GeometryCollection, MultiPolygon, MultiLineString)):
+                for g in geom.geoms:
+                    _append_projected_intervals(g, orientation, a0, a1, out)
+                return
+            try:
+                minx, miny, maxx, maxy = geom.bounds
+            except Exception:
+                return
+            if orientation == "horizontal":
+                a = max(float(a0), float(minx))
+                b = min(float(a1), float(maxx))
+            else:
+                a = max(float(a0), float(miny))
+                b = min(float(a1), float(maxy))
+            if b - a > 1e-3:
+                out.append((a, b))
+
+        def _wall_surface_geometry(wall: WallSegment) -> Optional[BaseGeometry]:
+            geom = wall.geometry
+            if geom is None or geom.is_empty:
+                return None
+            if isinstance(geom, (Polygon, MultiPolygon)):
+                return geom
+            try:
+                return geom.buffer(
+                    float(wall.thickness) / 2.0,
+                    cap_style=CAP_STYLE.flat,
+                    join_style=JOIN_STYLE.mitre,
+                )
+            except Exception:
+                return None
+
+        def _cover_intervals_horizontal(corridor_id: str, edge_line: LineString, x0: float, x1: float, thickness: float) -> List[Tuple[float, float]]:
             intervals: List[Tuple[float, float]] = []
+            eps = max(1e-3, float(thickness) * 0.1)
+            try:
+                edge_buffer = edge_line.buffer(float(thickness) / 2.0 + eps, cap_style=CAP_STYLE.flat)
+            except Exception:
+                return intervals
             for w in walls:
                 if w.type not in ("partition_wall", "exterior_wall"):
                     continue
                 if w.type == "partition_wall" and corridor_id not in (w.room_ids or []):
                     continue
+                surf = _wall_surface_geometry(w)
+                if surf is None or surf.is_empty:
+                    continue
                 try:
-                    minx, miny, maxx, maxy = w.geometry.bounds
+                    hit = surf.intersection(edge_buffer)
                 except Exception:
                     continue
-                tol = max(0.08, float(getattr(w, "thickness", 0.0)) / 2)
-                if abs(((float(miny) + float(maxy)) / 2) - float(y_edge)) > tol:
-                    continue
-                a = max(float(x0), float(minx))
-                b = min(float(x1), float(maxx))
-                if b - a > 1e-3:
-                    intervals.append((a, b))
+                _append_projected_intervals(hit, "horizontal", x0, x1, intervals)
             return _merge_intervals(intervals)
 
-        def _cover_intervals_vertical(corridor_id: str, x_edge: float, y0: float, y1: float) -> List[Tuple[float, float]]:
+        def _cover_intervals_vertical(corridor_id: str, edge_line: LineString, y0: float, y1: float, thickness: float) -> List[Tuple[float, float]]:
             intervals: List[Tuple[float, float]] = []
+            eps = max(1e-3, float(thickness) * 0.1)
+            try:
+                edge_buffer = edge_line.buffer(float(thickness) / 2.0 + eps, cap_style=CAP_STYLE.flat)
+            except Exception:
+                return intervals
             for w in walls:
                 if w.type not in ("partition_wall", "exterior_wall"):
                     continue
                 if w.type == "partition_wall" and corridor_id not in (w.room_ids or []):
                     continue
+                surf = _wall_surface_geometry(w)
+                if surf is None or surf.is_empty:
+                    continue
                 try:
-                    minx, miny, maxx, maxy = w.geometry.bounds
+                    hit = surf.intersection(edge_buffer)
                 except Exception:
                     continue
-                tol = max(0.08, float(getattr(w, "thickness", 0.0)) / 2)
-                if abs(((float(minx) + float(maxx)) / 2) - float(x_edge)) > tol:
-                    continue
-                a = max(float(y0), float(miny))
-                b = min(float(y1), float(maxy))
-                if b - a > 1e-3:
-                    intervals.append((a, b))
+                _append_projected_intervals(hit, "vertical", y0, y1, intervals)
             return _merge_intervals(intervals)
 
-        def _fill_gaps_1d_horizontal(corridor_id: str, y_edge: float, x0: float, x1: float) -> None:
-            covered = _cover_intervals_horizontal(corridor_id, y_edge, x0, x1)
+        def _fill_gaps_1d_horizontal(corridor_id: str, edge_line: LineString, y_line: float, x0: float, x1: float, thickness: float) -> None:
+            covered = _cover_intervals_horizontal(corridor_id, edge_line, x0, x1, thickness)
             cur = float(x0)
             for a, b in covered:
                 if a > cur + 1e-3:
                     if float(a - cur) > 0.1:
                         walls.append(WallSegment(
                             type="partition_wall",
-                            geometry=LineString([(float(cur), float(y_edge)), (float(a), float(y_edge))]),
-                            thickness=float(corridor_cover_thickness),
+                            geometry=LineString([(float(cur), float(y_line)), (float(a), float(y_line))]),
+                            thickness=float(thickness),
                             room_ids=[str(corridor_id)],
                         ))
                 cur = max(cur, b)
             if float(x1 - cur) > 0.1:
                 walls.append(WallSegment(
                     type="partition_wall",
-                    geometry=LineString([(float(cur), float(y_edge)), (float(x1), float(y_edge))]),
-                    thickness=float(corridor_cover_thickness),
+                    geometry=LineString([(float(cur), float(y_line)), (float(x1), float(y_line))]),
+                    thickness=float(thickness),
                     room_ids=[str(corridor_id)],
                 ))
 
-        def _fill_gaps_1d_vertical(corridor_id: str, x_edge: float, y0: float, y1: float) -> None:
-            covered = _cover_intervals_vertical(corridor_id, x_edge, y0, y1)
+        def _fill_gaps_1d_vertical(corridor_id: str, edge_line: LineString, x_line: float, y0: float, y1: float, thickness: float) -> None:
+            covered = _cover_intervals_vertical(corridor_id, edge_line, y0, y1, thickness)
             cur = float(y0)
             for a, b in covered:
                 if a > cur + 1e-3:
                     if float(a - cur) > 0.1:
                         walls.append(WallSegment(
                             type="partition_wall",
-                            geometry=LineString([(float(x_edge), float(cur)), (float(x_edge), float(a))]),
-                            thickness=float(corridor_cover_thickness),
+                            geometry=LineString([(float(x_line), float(cur)), (float(x_line), float(a))]),
+                            thickness=float(thickness),
                             room_ids=[str(corridor_id)],
                         ))
                 cur = max(cur, b)
             if float(y1 - cur) > 0.1:
                 walls.append(WallSegment(
                     type="partition_wall",
-                    geometry=LineString([(float(x_edge), float(cur)), (float(x_edge), float(y1))]),
-                    thickness=float(corridor_cover_thickness),
+                    geometry=LineString([(float(x_line), float(cur)), (float(x_line), float(y1))]),
+                    thickness=float(thickness),
                     room_ids=[str(corridor_id)],
                 ))
+
+        def _outward_normal_for_axis_edge(edge_line: LineString, corridor_poly: Polygon, thickness: float) -> Optional[Tuple[float, float]]:
+            coords = list(edge_line.coords)
+            if len(coords) < 2:
+                return None
+            (x0, y0), (x1, y1) = coords[0], coords[-1]
+            dx = abs(float(x1) - float(x0))
+            dy = abs(float(y1) - float(y0))
+            probe_dist = max(float(thickness) * 0.1, 0.005)
+            mid_pt = edge_line.interpolate(0.5, normalized=True)
+            if dy < 1e-3:
+                candidates = [(0.0, 1.0), (0.0, -1.0)]
+            elif dx < 1e-3:
+                candidates = [(1.0, 0.0), (-1.0, 0.0)]
+            else:
+                logger.warning("Skipping non-axis-aligned corridor boundary segment: %s", edge_line)
+                return None
+
+            probes = [
+                Point(float(mid_pt.x) + nx * probe_dist, float(mid_pt.y) + ny * probe_dist)
+                for nx, ny in candidates
+            ]
+            inside = [bool(corridor_poly.contains(p)) for p in probes]
+            if inside[0] != inside[1]:
+                return candidates[1] if inside[0] else candidates[0]
+
+            try:
+                inner = corridor_poly.buffer(-probe_dist * 0.5)
+            except Exception:
+                inner = None
+            if inner is not None and not inner.is_empty:
+                inner_inside = [bool(inner.contains(p)) for p in probes]
+                if inner_inside[0] != inner_inside[1]:
+                    return candidates[1] if inner_inside[0] else candidates[0]
+
+            logger.warning("Could not determine outward normal for corridor boundary segment: %s", edge_line)
+            return None
 
         for c in corridors or []:
             corridor_id = getattr(c, "id", None) if not isinstance(c, dict) else c.get("id")
@@ -1802,14 +2357,48 @@ def postprocess_floor(
                     continue
                 if corridor_poly.is_empty:
                     continue
-                minx, miny, maxx, maxy = corridor_poly.bounds
             except Exception:
                 continue
 
-            _fill_gaps_1d_horizontal(str(corridor_id), float(miny), float(minx), float(maxx))
-            _fill_gaps_1d_horizontal(str(corridor_id), float(maxy), float(minx), float(maxx))
-            _fill_gaps_1d_vertical(str(corridor_id), float(minx), float(miny), float(maxy))
-            _fill_gaps_1d_vertical(str(corridor_id), float(maxx), float(miny), float(maxy))
+            coords = list(corridor_poly.exterior.coords)
+            for p0, p1 in zip(coords, coords[1:]):
+                x0, y0 = float(p0[0]), float(p0[1])
+                x1, y1 = float(p1[0]), float(p1[1])
+                dx = abs(x1 - x0)
+                dy = abs(y1 - y0)
+                edge_line = LineString([(x0, y0), (x1, y1)])
+                normal = _outward_normal_for_axis_edge(edge_line, corridor_poly, float(corridor_cover_thickness))
+                if normal is None:
+                    continue
+                nx, ny = normal
+                if dy < 1e-3:
+                    x_start, x_end = sorted((x0, x1))
+                    if x_end - x_start <= 1e-3:
+                        continue
+                    y_line = y0 + ny * float(corridor_cover_thickness) / 2.0
+                    _fill_gaps_1d_horizontal(
+                        str(corridor_id),
+                        edge_line,
+                        float(y_line),
+                        float(x_start),
+                        float(x_end),
+                        float(corridor_cover_thickness),
+                    )
+                elif dx < 1e-3:
+                    y_start, y_end = sorted((y0, y1))
+                    if y_end - y_start <= 1e-3:
+                        continue
+                    x_line = x0 + nx * float(corridor_cover_thickness) / 2.0
+                    _fill_gaps_1d_vertical(
+                        str(corridor_id),
+                        edge_line,
+                        float(x_line),
+                        float(y_start),
+                        float(y_end),
+                        float(corridor_cover_thickness),
+                    )
+                else:
+                    logger.warning("Skipping non-axis-aligned corridor boundary segment: %s", edge_line)
 
     return PostprocessResult(walls=walls, doors=doors, windows=windows)
 

@@ -1,0 +1,2199 @@
+{
+  "width": 27.39,
+  "height": 18.26,
+  "elements": [
+    {
+      "id": "F1_floor_slab",
+      "type": "floor_slab",
+      "polygon": [
+        [
+          27.3861,
+          0.0
+        ],
+        [
+          27.3861,
+          18.2574
+        ],
+        [
+          0.0,
+          18.2574
+        ],
+        [
+          0.0,
+          0.0
+        ],
+        [
+          27.3861,
+          0.0
+        ]
+      ],
+      "x": 0.0,
+      "y": 0.0,
+      "width": 27.3861,
+      "height": 18.2574,
+      "zOrder": 10
+    },
+    {
+      "id": "corridor_h_main",
+      "type": "corridor",
+      "polygon": [
+        [
+          19.646,
+          10.3574
+        ],
+        [
+          19.646,
+          12.1574
+        ],
+        [
+          8.9,
+          12.1574
+        ],
+        [
+          8.9,
+          10.3574
+        ],
+        [
+          19.646,
+          10.3574
+        ]
+      ],
+      "x": 8.9,
+      "y": 10.36,
+      "width": 10.75,
+      "height": 1.8,
+      "zOrder": 20
+    },
+    {
+      "id": "room_002",
+      "type": "office",
+      "polygon": [
+        [
+          17.8,
+          5.4574
+        ],
+        [
+          5.2,
+          5.4574
+        ],
+        [
+          5.2,
+          0.0
+        ],
+        [
+          17.8,
+          0.0
+        ],
+        [
+          17.8,
+          5.4574
+        ]
+      ],
+      "x": 5.2,
+      "y": 0.0,
+      "width": 12.6,
+      "height": 5.46,
+      "label": "room_002",
+      "is_dummy": false,
+      "zOrder": 20
+    },
+    {
+      "id": "room_003",
+      "type": "office",
+      "polygon": [
+        [
+          27.0,
+          5.4574
+        ],
+        [
+          17.8,
+          5.4574
+        ],
+        [
+          17.8,
+          0.0
+        ],
+        [
+          27.0,
+          0.0
+        ],
+        [
+          27.0,
+          5.4574
+        ]
+      ],
+      "x": 17.8,
+      "y": 0.0,
+      "width": 9.2,
+      "height": 5.46,
+      "label": "room_003",
+      "is_dummy": false,
+      "zOrder": 20
+    },
+    {
+      "id": "room_006",
+      "type": "pantry",
+      "polygon": [
+        [
+          5.2,
+          5.4574
+        ],
+        [
+          0.7,
+          5.4574
+        ],
+        [
+          0.7,
+          0.0
+        ],
+        [
+          5.2,
+          0.0
+        ],
+        [
+          5.2,
+          5.4574
+        ]
+      ],
+      "x": 0.7,
+      "y": 0.0,
+      "width": 4.5,
+      "height": 5.46,
+      "label": "room_006",
+      "is_dummy": false,
+      "zOrder": 20
+    },
+    {
+      "id": "room_004",
+      "type": "office",
+      "polygon": [
+        [
+          9.7,
+          13.0574
+        ],
+        [
+          9.7,
+          18.2574
+        ],
+        [
+          0.0,
+          18.2574
+        ],
+        [
+          0.0,
+          13.0574
+        ],
+        [
+          9.7,
+          13.0574
+        ]
+      ],
+      "x": 0.0,
+      "y": 13.06,
+      "width": 9.7,
+      "height": 5.2,
+      "label": "room_004",
+      "is_dummy": false,
+      "zOrder": 20
+    },
+    {
+      "id": "room_005",
+      "type": "meeting_room",
+      "polygon": [
+        [
+          9.7,
+          13.0574
+        ],
+        [
+          19.5,
+          13.0574
+        ],
+        [
+          19.5,
+          18.2574
+        ],
+        [
+          9.7,
+          18.2574
+        ],
+        [
+          9.7,
+          13.0574
+        ]
+      ],
+      "x": 9.7,
+      "y": 13.06,
+      "width": 9.8,
+      "height": 5.2,
+      "label": "room_005",
+      "is_dummy": false,
+      "zOrder": 20
+    },
+    {
+      "id": "room_007",
+      "type": "bathroom",
+      "polygon": [
+        [
+          19.5,
+          13.0574
+        ],
+        [
+          24.4,
+          13.0574
+        ],
+        [
+          24.4,
+          18.2574
+        ],
+        [
+          19.5,
+          18.2574
+        ],
+        [
+          19.5,
+          13.0574
+        ]
+      ],
+      "x": 19.5,
+      "y": 13.06,
+      "width": 4.9,
+      "height": 5.2,
+      "label": "room_007",
+      "is_dummy": false,
+      "zOrder": 20
+    },
+    {
+      "id": "room_dummy_623a44",
+      "type": "utility",
+      "polygon": [
+        [
+          24.4,
+          13.0574
+        ],
+        [
+          27.1,
+          13.0574
+        ],
+        [
+          27.1,
+          18.2574
+        ],
+        [
+          24.4,
+          18.2574
+        ],
+        [
+          24.4,
+          13.0574
+        ]
+      ],
+      "x": 24.4,
+      "y": 13.06,
+      "width": 2.7,
+      "height": 5.2,
+      "label": "room_dummy_623a44",
+      "is_dummy": true,
+      "zOrder": 20
+    },
+    {
+      "id": "room_001",
+      "type": "lobby",
+      "polygon": [
+        [
+          14.7,
+          5.5574
+        ],
+        [
+          14.7,
+          10.3574
+        ],
+        [
+          0.0,
+          10.3574
+        ],
+        [
+          0.0,
+          5.5574
+        ],
+        [
+          14.7,
+          5.5574
+        ]
+      ],
+      "x": 0.0,
+      "y": 5.56,
+      "width": 14.7,
+      "height": 4.8,
+      "label": "room_001",
+      "is_dummy": false,
+      "zOrder": 20
+    },
+    {
+      "id": "room_filler_utility_c926b3",
+      "type": "utility",
+      "polygon": [
+        [
+          14.7,
+          10.3574
+        ],
+        [
+          14.7,
+          5.5574
+        ],
+        [
+          19.6,
+          5.5574
+        ],
+        [
+          19.6,
+          10.3574
+        ],
+        [
+          14.7,
+          10.3574
+        ]
+      ],
+      "x": 14.7,
+      "y": 5.56,
+      "width": 4.9,
+      "height": 4.8,
+      "label": "room_filler_utility_c926b3",
+      "is_dummy": false,
+      "zOrder": 20
+    },
+    {
+      "id": "room_void_4ac7e0",
+      "type": "void",
+      "polygon": [
+        [
+          0.001,
+          12.1584
+        ],
+        [
+          19.6461,
+          12.1584
+        ],
+        [
+          19.6461,
+          13.0064
+        ],
+        [
+          0.001,
+          13.0064
+        ],
+        [
+          0.001,
+          12.1584
+        ]
+      ],
+      "x": 0.0,
+      "y": 12.16,
+      "width": 19.65,
+      "height": 0.85,
+      "label": "room_void_4ac7e0",
+      "is_dummy": true,
+      "zOrder": 20
+    },
+    {
+      "id": "room_void_b8ecc1",
+      "type": "void",
+      "polygon": [
+        [
+          0.001,
+          10.3584
+        ],
+        [
+          8.899,
+          10.3584
+        ],
+        [
+          8.899,
+          12.1564
+        ],
+        [
+          0.001,
+          12.1564
+        ],
+        [
+          0.001,
+          10.3584
+        ]
+      ],
+      "x": 0.0,
+      "y": 10.36,
+      "width": 8.9,
+      "height": 1.8,
+      "label": "room_void_b8ecc1",
+      "is_dummy": true,
+      "zOrder": 20
+    },
+    {
+      "id": "F1_staircase_hall",
+      "type": "staircase_hall",
+      "polygon": [
+        [
+          19.6461,
+          13.0074
+        ],
+        [
+          19.6461,
+          10.7574
+        ],
+        [
+          22.6461,
+          10.7574
+        ],
+        [
+          22.6461,
+          13.0074
+        ],
+        [
+          19.6461,
+          13.0074
+        ]
+      ],
+      "x": 19.65,
+      "y": 10.76,
+      "width": 3.0,
+      "height": 2.25,
+      "forward": [
+        -0.9958909661296055,
+        -0.09056038638080668,
+        0.0
+      ],
+      "zOrder": 30
+    },
+    {
+      "id": "F1_staircase_shaft",
+      "type": "staircase_shaft",
+      "polygon": [
+        [
+          19.6461,
+          10.7574
+        ],
+        [
+          19.6461,
+          5.5074
+        ],
+        [
+          22.6461,
+          5.5074
+        ],
+        [
+          22.6461,
+          10.7574
+        ],
+        [
+          19.6461,
+          10.7574
+        ]
+      ],
+      "x": 19.65,
+      "y": 5.51,
+      "width": 3.0,
+      "height": 5.25,
+      "forward": [
+        -9.473903143468002e-16,
+        1.0,
+        0.0
+      ],
+      "zOrder": 30
+    },
+    {
+      "id": "F1_elevator_hall",
+      "type": "elevator_hall",
+      "polygon": [
+        [
+          22.6461,
+          13.0074
+        ],
+        [
+          22.6461,
+          9.2574
+        ],
+        [
+          27.1461,
+          9.2574
+        ],
+        [
+          27.1461,
+          13.0074
+        ],
+        [
+          22.6461,
+          13.0074
+        ]
+      ],
+      "x": 22.65,
+      "y": 9.26,
+      "width": 4.5,
+      "height": 3.75,
+      "forward": [
+        -0.9999307784602022,
+        0.011765980111046485,
+        0.0
+      ],
+      "zOrder": 30
+    },
+    {
+      "id": "F1_elevator_shaft",
+      "type": "elevator_shaft",
+      "polygon": [
+        [
+          22.6461,
+          9.2574
+        ],
+        [
+          22.6461,
+          5.5074
+        ],
+        [
+          27.1461,
+          5.5074
+        ],
+        [
+          27.1461,
+          9.2574
+        ],
+        [
+          22.6461,
+          9.2574
+        ]
+      ],
+      "x": 22.65,
+      "y": 5.51,
+      "width": 4.5,
+      "height": 3.75,
+      "forward": [
+        0.0,
+        1.0,
+        0.0
+      ],
+      "zOrder": 30
+    },
+    {
+      "id": "F1_wall_17",
+      "type": "partition_wall",
+      "polygon": [
+        [
+          24.46,
+          12.95
+        ],
+        [
+          24.46,
+          13.07
+        ],
+        [
+          22.59,
+          13.07
+        ],
+        [
+          22.59,
+          12.95
+        ],
+        [
+          24.46,
+          12.95
+        ]
+      ],
+      "x": 22.59,
+      "y": 12.95,
+      "width": 1.87,
+      "height": 0.12,
+      "thickness": 0.12,
+      "room_ids": [
+        "core_elevator_hall",
+        "room_007"
+      ],
+      "zOrder": 80
+    },
+    {
+      "id": "F1_wall_18",
+      "type": "partition_wall",
+      "polygon": [
+        [
+          27.21,
+          12.95
+        ],
+        [
+          27.21,
+          13.07
+        ],
+        [
+          24.34,
+          13.07
+        ],
+        [
+          24.34,
+          12.95
+        ],
+        [
+          27.21,
+          12.95
+        ]
+      ],
+      "x": 24.34,
+      "y": 12.95,
+      "width": 2.87,
+      "height": 0.12,
+      "thickness": 0.12,
+      "room_ids": [
+        "core_elevator_hall",
+        "room_dummy_623a44"
+      ],
+      "zOrder": 80
+    },
+    {
+      "id": "F1_wall_19",
+      "type": "partition_wall",
+      "polygon": [
+        [
+          27.21,
+          5.45
+        ],
+        [
+          27.21,
+          5.57
+        ],
+        [
+          22.59,
+          5.57
+        ],
+        [
+          22.59,
+          5.45
+        ],
+        [
+          27.21,
+          5.45
+        ]
+      ],
+      "x": 22.59,
+      "y": 5.45,
+      "width": 4.62,
+      "height": 0.12,
+      "thickness": 0.12,
+      "room_ids": [
+        "room_003",
+        "core_elevator_shaft"
+      ],
+      "zOrder": 80
+    },
+    {
+      "id": "F1_wall_20",
+      "type": "partition_wall",
+      "polygon": [
+        [
+          14.76,
+          10.3
+        ],
+        [
+          14.76,
+          10.42
+        ],
+        [
+          8.84,
+          10.42
+        ],
+        [
+          8.84,
+          10.3
+        ],
+        [
+          14.76,
+          10.3
+        ]
+      ],
+      "x": 8.84,
+      "y": 10.3,
+      "width": 5.92,
+      "height": 0.12,
+      "thickness": 0.12,
+      "room_ids": [
+        "corridor_h_main",
+        "room_001"
+      ],
+      "zOrder": 80
+    },
+    {
+      "id": "F1_wall_21",
+      "type": "partition_wall",
+      "polygon": [
+        [
+          19.71,
+          10.3
+        ],
+        [
+          19.71,
+          10.42
+        ],
+        [
+          14.64,
+          10.42
+        ],
+        [
+          14.64,
+          10.3
+        ],
+        [
+          19.71,
+          10.3
+        ]
+      ],
+      "x": 14.64,
+      "y": 10.3,
+      "width": 5.07,
+      "height": 0.12,
+      "thickness": 0.12,
+      "room_ids": [
+        "corridor_h_main",
+        "room_filler_utility_c926b3"
+      ],
+      "zOrder": 80
+    },
+    {
+      "id": "F1_wall_22",
+      "type": "partition_wall",
+      "polygon": [
+        [
+          17.74,
+          -0.0
+        ],
+        [
+          17.86,
+          -0.0
+        ],
+        [
+          17.86,
+          5.56
+        ],
+        [
+          17.74,
+          5.56
+        ],
+        [
+          17.74,
+          -0.0
+        ]
+      ],
+      "x": 17.74,
+      "y": -0.0,
+      "width": 0.12,
+      "height": 5.56,
+      "thickness": 0.12,
+      "room_ids": [
+        "room_003",
+        "room_002"
+      ],
+      "zOrder": 80
+    },
+    {
+      "id": "F1_wall_23",
+      "type": "partition_wall",
+      "polygon": [
+        [
+          5.14,
+          -0.0
+        ],
+        [
+          5.26,
+          -0.0
+        ],
+        [
+          5.26,
+          5.56
+        ],
+        [
+          5.14,
+          5.56
+        ],
+        [
+          5.14,
+          -0.0
+        ]
+      ],
+      "x": 5.14,
+      "y": -0.0,
+      "width": 0.12,
+      "height": 5.56,
+      "thickness": 0.12,
+      "room_ids": [
+        "room_002",
+        "room_006"
+      ],
+      "zOrder": 80
+    },
+    {
+      "id": "F1_wall_24",
+      "type": "partition_wall",
+      "polygon": [
+        [
+          9.64,
+          12.95
+        ],
+        [
+          9.76,
+          12.95
+        ],
+        [
+          9.76,
+          18.26
+        ],
+        [
+          9.64,
+          18.26
+        ],
+        [
+          9.64,
+          12.95
+        ]
+      ],
+      "x": 9.64,
+      "y": 12.95,
+      "width": 0.12,
+      "height": 5.31,
+      "thickness": 0.12,
+      "room_ids": [
+        "room_005",
+        "room_004"
+      ],
+      "zOrder": 80
+    },
+    {
+      "id": "F1_wall_25",
+      "type": "partition_wall",
+      "polygon": [
+        [
+          19.59,
+          12.95
+        ],
+        [
+          19.71,
+          12.95
+        ],
+        [
+          19.71,
+          18.26
+        ],
+        [
+          19.59,
+          18.26
+        ],
+        [
+          19.59,
+          12.95
+        ]
+      ],
+      "x": 19.59,
+      "y": 12.95,
+      "width": 0.12,
+      "height": 5.31,
+      "thickness": 0.12,
+      "room_ids": [
+        "room_005",
+        "room_007"
+      ],
+      "zOrder": 80
+    },
+    {
+      "id": "F1_wall_26",
+      "type": "partition_wall",
+      "polygon": [
+        [
+          24.34,
+          12.95
+        ],
+        [
+          24.46,
+          12.95
+        ],
+        [
+          24.46,
+          18.26
+        ],
+        [
+          24.34,
+          18.26
+        ],
+        [
+          24.34,
+          12.95
+        ]
+      ],
+      "x": 24.34,
+      "y": 12.95,
+      "width": 0.12,
+      "height": 5.31,
+      "thickness": 0.12,
+      "room_ids": [
+        "room_007",
+        "room_dummy_623a44"
+      ],
+      "zOrder": 80
+    },
+    {
+      "id": "F1_wall_27",
+      "type": "partition_wall",
+      "polygon": [
+        [
+          14.64,
+          5.46
+        ],
+        [
+          14.76,
+          5.46
+        ],
+        [
+          14.76,
+          10.42
+        ],
+        [
+          14.64,
+          10.42
+        ],
+        [
+          14.64,
+          5.46
+        ]
+      ],
+      "x": 14.64,
+      "y": 5.46,
+      "width": 0.12,
+      "height": 4.96,
+      "thickness": 0.12,
+      "room_ids": [
+        "room_001",
+        "room_filler_utility_c926b3"
+      ],
+      "zOrder": 80
+    },
+    {
+      "id": "F1_wall_28",
+      "type": "partition_wall",
+      "polygon": [
+        [
+          22.59,
+          10.7
+        ],
+        [
+          22.71,
+          10.7
+        ],
+        [
+          22.71,
+          13.06
+        ],
+        [
+          22.59,
+          13.06
+        ],
+        [
+          22.59,
+          10.7
+        ]
+      ],
+      "x": 22.59,
+      "y": 10.7,
+      "width": 0.12,
+      "height": 2.36,
+      "thickness": 0.12,
+      "room_ids": [
+        "core_elevator_hall",
+        "core_staircase_hall"
+      ],
+      "zOrder": 80
+    },
+    {
+      "id": "F1_wall_29",
+      "type": "partition_wall",
+      "polygon": [
+        [
+          19.59,
+          10.7
+        ],
+        [
+          19.71,
+          10.7
+        ],
+        [
+          19.71,
+          12.22
+        ],
+        [
+          19.59,
+          12.22
+        ],
+        [
+          19.59,
+          10.7
+        ]
+      ],
+      "x": 19.59,
+      "y": 10.7,
+      "width": 0.12,
+      "height": 1.52,
+      "thickness": 0.12,
+      "room_ids": [
+        "corridor_h_main",
+        "core_staircase_hall"
+      ],
+      "zOrder": 80
+    },
+    {
+      "id": "F1_wall_30",
+      "type": "partition_wall",
+      "polygon": [
+        [
+          22.71,
+          12.95
+        ],
+        [
+          22.71,
+          13.07
+        ],
+        [
+          19.6,
+          13.07
+        ],
+        [
+          19.6,
+          12.95
+        ],
+        [
+          22.71,
+          12.95
+        ]
+      ],
+      "x": 19.6,
+      "y": 12.95,
+      "width": 3.11,
+      "height": 0.12,
+      "thickness": 0.12,
+      "room_ids": [
+        "core_staircase_hall",
+        "room_007"
+      ],
+      "zOrder": 80
+    },
+    {
+      "id": "F1_wall_31",
+      "type": "partition_wall",
+      "polygon": [
+        [
+          22.59,
+          9.2
+        ],
+        [
+          22.71,
+          9.2
+        ],
+        [
+          22.71,
+          10.82
+        ],
+        [
+          22.59,
+          10.82
+        ],
+        [
+          22.59,
+          9.2
+        ]
+      ],
+      "x": 22.59,
+      "y": 9.2,
+      "width": 0.12,
+      "height": 1.62,
+      "thickness": 0.12,
+      "room_ids": [
+        "core_elevator_hall",
+        "core_staircase_shaft"
+      ],
+      "zOrder": 80
+    },
+    {
+      "id": "F1_wall_32",
+      "type": "partition_wall",
+      "polygon": [
+        [
+          22.59,
+          5.46
+        ],
+        [
+          22.71,
+          5.46
+        ],
+        [
+          22.71,
+          9.32
+        ],
+        [
+          22.59,
+          9.32
+        ],
+        [
+          22.59,
+          5.46
+        ]
+      ],
+      "x": 22.59,
+      "y": 5.46,
+      "width": 0.12,
+      "height": 3.86,
+      "thickness": 0.12,
+      "room_ids": [
+        "core_staircase_shaft",
+        "core_elevator_shaft"
+      ],
+      "zOrder": 80
+    },
+    {
+      "id": "F1_wall_33",
+      "type": "partition_wall",
+      "polygon": [
+        [
+          19.59,
+          10.3
+        ],
+        [
+          19.71,
+          10.3
+        ],
+        [
+          19.71,
+          10.82
+        ],
+        [
+          19.59,
+          10.82
+        ],
+        [
+          19.59,
+          10.3
+        ]
+      ],
+      "x": 19.59,
+      "y": 10.3,
+      "width": 0.12,
+      "height": 0.52,
+      "thickness": 0.12,
+      "room_ids": [
+        "corridor_h_main",
+        "core_staircase_shaft"
+      ],
+      "zOrder": 80
+    },
+    {
+      "id": "F1_wall_34",
+      "type": "partition_wall",
+      "polygon": [
+        [
+          22.71,
+          5.45
+        ],
+        [
+          22.71,
+          5.57
+        ],
+        [
+          19.6,
+          5.57
+        ],
+        [
+          19.6,
+          5.45
+        ],
+        [
+          22.71,
+          5.45
+        ]
+      ],
+      "x": 19.6,
+      "y": 5.45,
+      "width": 3.11,
+      "height": 0.12,
+      "thickness": 0.12,
+      "room_ids": [
+        "room_003",
+        "core_staircase_shaft"
+      ],
+      "zOrder": 80
+    },
+    {
+      "id": "F1_wall_35",
+      "type": "partition_wall",
+      "polygon": [
+        [
+          19.59,
+          5.46
+        ],
+        [
+          19.71,
+          5.46
+        ],
+        [
+          19.71,
+          10.42
+        ],
+        [
+          19.59,
+          10.42
+        ],
+        [
+          19.59,
+          5.46
+        ]
+      ],
+      "x": 19.59,
+      "y": 5.46,
+      "width": 0.12,
+      "height": 4.96,
+      "thickness": 0.12,
+      "room_ids": [
+        "core_staircase_shaft",
+        "room_filler_utility_c926b3"
+      ],
+      "zOrder": 80
+    },
+    {
+      "id": "F1_wall_36",
+      "type": "partition_wall",
+      "polygon": [
+        [
+          14.76,
+          5.45
+        ],
+        [
+          14.76,
+          5.57
+        ],
+        [
+          5.14,
+          5.57
+        ],
+        [
+          5.14,
+          5.45
+        ],
+        [
+          14.76,
+          5.45
+        ]
+      ],
+      "x": 5.14,
+      "y": 5.45,
+      "width": 9.62,
+      "height": 0.12,
+      "thickness": 0.12,
+      "room_ids": [
+        "room_001",
+        "room_002"
+      ],
+      "zOrder": 80
+    },
+    {
+      "id": "F1_wall_37",
+      "type": "partition_wall",
+      "polygon": [
+        [
+          17.86,
+          5.45
+        ],
+        [
+          17.86,
+          5.57
+        ],
+        [
+          14.64,
+          5.57
+        ],
+        [
+          14.64,
+          5.45
+        ],
+        [
+          17.86,
+          5.45
+        ]
+      ],
+      "x": 14.64,
+      "y": 5.45,
+      "width": 3.22,
+      "height": 0.12,
+      "thickness": 0.12,
+      "room_ids": [
+        "room_002",
+        "room_filler_utility_c926b3"
+      ],
+      "zOrder": 80
+    },
+    {
+      "id": "F1_wall_38",
+      "type": "partition_wall",
+      "polygon": [
+        [
+          19.71,
+          5.45
+        ],
+        [
+          19.71,
+          5.57
+        ],
+        [
+          17.74,
+          5.57
+        ],
+        [
+          17.74,
+          5.45
+        ],
+        [
+          19.71,
+          5.45
+        ]
+      ],
+      "x": 17.74,
+      "y": 5.45,
+      "width": 1.97,
+      "height": 0.12,
+      "thickness": 0.12,
+      "room_ids": [
+        "room_003",
+        "room_filler_utility_c926b3"
+      ],
+      "zOrder": 80
+    },
+    {
+      "id": "F1_wall_39",
+      "type": "partition_wall",
+      "polygon": [
+        [
+          5.26,
+          5.45
+        ],
+        [
+          5.26,
+          5.57
+        ],
+        [
+          0.64,
+          5.57
+        ],
+        [
+          0.64,
+          5.45
+        ],
+        [
+          5.26,
+          5.45
+        ]
+      ],
+      "x": 0.64,
+      "y": 5.45,
+      "width": 4.62,
+      "height": 0.12,
+      "thickness": 0.12,
+      "room_ids": [
+        "room_001",
+        "room_006"
+      ],
+      "zOrder": 80
+    },
+    {
+      "id": "F1_wall_40",
+      "type": "partition_wall",
+      "polygon": [
+        [
+          19.65,
+          12.1
+        ],
+        [
+          19.65,
+          12.22
+        ],
+        [
+          0.0,
+          12.22
+        ],
+        [
+          0.0,
+          12.1
+        ],
+        [
+          19.65,
+          12.1
+        ]
+      ],
+      "x": 0.0,
+      "y": 12.1,
+      "width": 19.65,
+      "height": 0.12,
+      "thickness": 0.12,
+      "room_ids": [
+        "room_void_4ac7e0"
+      ],
+      "zOrder": 80
+    },
+    {
+      "id": "F1_wall_41",
+      "type": "partition_wall",
+      "polygon": [
+        [
+          19.59,
+          12.16
+        ],
+        [
+          19.71,
+          12.16
+        ],
+        [
+          19.71,
+          13.01
+        ],
+        [
+          19.59,
+          13.01
+        ],
+        [
+          19.59,
+          12.16
+        ]
+      ],
+      "x": 19.59,
+      "y": 12.16,
+      "width": 0.12,
+      "height": 0.85,
+      "thickness": 0.12,
+      "room_ids": [
+        "room_void_4ac7e0"
+      ],
+      "zOrder": 80
+    },
+    {
+      "id": "F1_wall_42",
+      "type": "partition_wall",
+      "polygon": [
+        [
+          19.65,
+          12.95
+        ],
+        [
+          19.65,
+          13.07
+        ],
+        [
+          0.0,
+          13.07
+        ],
+        [
+          0.0,
+          12.95
+        ],
+        [
+          19.65,
+          12.95
+        ]
+      ],
+      "x": 0.0,
+      "y": 12.95,
+      "width": 19.65,
+      "height": 0.12,
+      "thickness": 0.12,
+      "room_ids": [
+        "room_void_4ac7e0"
+      ],
+      "zOrder": 80
+    },
+    {
+      "id": "F1_wall_43",
+      "type": "partition_wall",
+      "polygon": [
+        [
+          8.9,
+          10.3
+        ],
+        [
+          8.9,
+          10.42
+        ],
+        [
+          0.0,
+          10.42
+        ],
+        [
+          0.0,
+          10.3
+        ],
+        [
+          8.9,
+          10.3
+        ]
+      ],
+      "x": 0.0,
+      "y": 10.3,
+      "width": 8.9,
+      "height": 0.12,
+      "thickness": 0.12,
+      "room_ids": [
+        "room_void_b8ecc1"
+      ],
+      "zOrder": 80
+    },
+    {
+      "id": "F1_wall_44",
+      "type": "partition_wall",
+      "polygon": [
+        [
+          8.84,
+          10.36
+        ],
+        [
+          8.96,
+          10.36
+        ],
+        [
+          8.96,
+          12.16
+        ],
+        [
+          8.84,
+          12.16
+        ],
+        [
+          8.84,
+          10.36
+        ]
+      ],
+      "x": 8.84,
+      "y": 10.36,
+      "width": 0.12,
+      "height": 1.8,
+      "thickness": 0.12,
+      "room_ids": [
+        "room_void_b8ecc1"
+      ],
+      "zOrder": 80
+    },
+    {
+      "id": "F1_wall_45",
+      "type": "partition_wall",
+      "polygon": [
+        [
+          8.9,
+          12.1
+        ],
+        [
+          8.9,
+          12.22
+        ],
+        [
+          0.0,
+          12.22
+        ],
+        [
+          0.0,
+          12.1
+        ],
+        [
+          8.9,
+          12.1
+        ]
+      ],
+      "x": 0.0,
+      "y": 12.1,
+      "width": 8.9,
+      "height": 0.12,
+      "thickness": 0.12,
+      "room_ids": [
+        "room_void_b8ecc1"
+      ],
+      "zOrder": 80
+    },
+    {
+      "id": "F1_wall_46",
+      "type": "exterior_wall",
+      "polygon": [
+        [
+          0.0,
+          -0.0
+        ],
+        [
+          27.39,
+          -0.0
+        ],
+        [
+          27.39,
+          0.24
+        ],
+        [
+          27.15,
+          0.24
+        ],
+        [
+          0.24,
+          0.24
+        ],
+        [
+          0.0,
+          0.24
+        ],
+        [
+          0.0,
+          -0.0
+        ]
+      ],
+      "x": 0.0,
+      "y": -0.0,
+      "width": 27.39,
+      "height": 0.24,
+      "thickness": 0.24,
+      "room_ids": [
+        "__exterior__"
+      ],
+      "zOrder": 80
+    },
+    {
+      "id": "F1_wall_47",
+      "type": "exterior_wall",
+      "polygon": [
+        [
+          0.0,
+          18.02
+        ],
+        [
+          27.39,
+          18.02
+        ],
+        [
+          27.39,
+          18.26
+        ],
+        [
+          0.0,
+          18.26
+        ],
+        [
+          0.0,
+          18.02
+        ]
+      ],
+      "x": 0.0,
+      "y": 18.02,
+      "width": 27.39,
+      "height": 0.24,
+      "thickness": 0.24,
+      "room_ids": [
+        "__exterior__"
+      ],
+      "zOrder": 80
+    },
+    {
+      "id": "F1_wall_48",
+      "type": "exterior_wall",
+      "polygon": [
+        [
+          0.0,
+          0.24
+        ],
+        [
+          0.24,
+          0.24
+        ],
+        [
+          0.24,
+          18.02
+        ],
+        [
+          0.24,
+          18.02
+        ],
+        [
+          0.0,
+          18.02
+        ],
+        [
+          0.0,
+          0.24
+        ]
+      ],
+      "x": 0.0,
+      "y": 0.24,
+      "width": 0.24,
+      "height": 17.78,
+      "thickness": 0.24,
+      "room_ids": [
+        "__exterior__"
+      ],
+      "zOrder": 80
+    },
+    {
+      "id": "F1_wall_49",
+      "type": "exterior_wall",
+      "polygon": [
+        [
+          27.39,
+          18.02
+        ],
+        [
+          27.15,
+          18.02
+        ],
+        [
+          27.15,
+          18.02
+        ],
+        [
+          27.15,
+          0.24
+        ],
+        [
+          27.39,
+          0.24
+        ],
+        [
+          27.39,
+          18.02
+        ]
+      ],
+      "x": 27.15,
+      "y": 0.24,
+      "width": 0.24,
+      "height": 17.78,
+      "thickness": 0.24,
+      "room_ids": [
+        "__exterior__"
+      ],
+      "zOrder": 80
+    },
+    {
+      "id": "F1_wall_50",
+      "type": "partition_wall",
+      "polygon": [
+        [
+          19.59,
+          12.16
+        ],
+        [
+          19.59,
+          12.28
+        ],
+        [
+          8.9,
+          12.28
+        ],
+        [
+          8.9,
+          12.16
+        ],
+        [
+          19.59,
+          12.16
+        ]
+      ],
+      "x": 8.9,
+      "y": 12.16,
+      "width": 10.69,
+      "height": 0.12,
+      "thickness": 0.12,
+      "room_ids": [
+        "corridor_h_main"
+      ],
+      "zOrder": 80
+    },
+    {
+      "id": "F1_wall_51",
+      "type": "partition_wall",
+      "polygon": [
+        [
+          8.78,
+          10.42
+        ],
+        [
+          8.9,
+          10.42
+        ],
+        [
+          8.9,
+          12.16
+        ],
+        [
+          8.78,
+          12.16
+        ],
+        [
+          8.78,
+          10.42
+        ]
+      ],
+      "x": 8.78,
+      "y": 10.42,
+      "width": 0.12,
+      "height": 1.74,
+      "thickness": 0.12,
+      "room_ids": [
+        "corridor_h_main"
+      ],
+      "zOrder": 80
+    },
+    {
+      "id": "F1_door_52",
+      "type": "door",
+      "x": 22.59,
+      "y": 11.48,
+      "width": 0.12,
+      "height": 0.8,
+      "rotation": 0.0,
+      "swing_angle": 90,
+      "swing_dir": "left",
+      "connects": [
+        "core_elevator_hall",
+        "core_staircase_hall"
+      ],
+      "anchor": "min",
+      "forward": [
+        -1.0,
+        -0.0,
+        0.0
+      ],
+      "thickness": 0.12,
+      "zOrder": 90
+    },
+    {
+      "id": "F1_door_53",
+      "type": "door",
+      "x": 17.74,
+      "y": 2.33,
+      "width": 0.12,
+      "height": 0.9,
+      "rotation": 0.0,
+      "swing_angle": 90,
+      "swing_dir": "left",
+      "connects": [
+        "room_003",
+        "room_002"
+      ],
+      "anchor": "min",
+      "forward": [
+        1.0,
+        -0.0,
+        0.0
+      ],
+      "thickness": 0.12,
+      "zOrder": 90
+    },
+    {
+      "id": "F1_door_54",
+      "type": "door",
+      "x": 5.14,
+      "y": 2.33,
+      "width": 0.12,
+      "height": 0.9,
+      "rotation": 0.0,
+      "swing_angle": 90,
+      "swing_dir": "left",
+      "connects": [
+        "room_002",
+        "room_006"
+      ],
+      "anchor": "min",
+      "forward": [
+        -1.0,
+        -0.0,
+        0.0
+      ],
+      "thickness": 0.12,
+      "zOrder": 90
+    },
+    {
+      "id": "F1_door_55",
+      "type": "door",
+      "x": 9.64,
+      "y": 15.16,
+      "width": 0.12,
+      "height": 0.9,
+      "rotation": 0.0,
+      "swing_angle": 90,
+      "swing_dir": "left",
+      "connects": [
+        "room_005",
+        "room_004"
+      ],
+      "anchor": "min",
+      "forward": [
+        1.0,
+        -0.0,
+        0.0
+      ],
+      "thickness": 0.12,
+      "zOrder": 90
+    },
+    {
+      "id": "F1_door_56",
+      "type": "door",
+      "x": 19.59,
+      "y": 15.16,
+      "width": 0.12,
+      "height": 0.9,
+      "rotation": 0.0,
+      "swing_angle": 90,
+      "swing_dir": "left",
+      "connects": [
+        "room_005",
+        "room_007"
+      ],
+      "anchor": "min",
+      "forward": [
+        1.0,
+        -0.0,
+        0.0
+      ],
+      "thickness": 0.12,
+      "zOrder": 90
+    },
+    {
+      "id": "F1_door_57",
+      "type": "door",
+      "x": 11.35,
+      "y": 10.3,
+      "width": 0.9,
+      "height": 0.12,
+      "rotation": 0.0,
+      "swing_angle": 90,
+      "swing_dir": "left",
+      "connects": [
+        "corridor_h_main",
+        "room_001"
+      ],
+      "anchor": "min",
+      "forward": [
+        -0.9026920738070165,
+        -0.4302871365564951,
+        0.0
+      ],
+      "thickness": 0.12,
+      "zOrder": 90
+    },
+    {
+      "id": "F1_door_58",
+      "type": "door",
+      "x": 16.72,
+      "y": 10.3,
+      "width": 0.9,
+      "height": 0.12,
+      "rotation": 0.0,
+      "swing_angle": 90,
+      "swing_dir": "left",
+      "connects": [
+        "corridor_h_main",
+        "room_filler_utility_c926b3"
+      ],
+      "anchor": "min",
+      "forward": [
+        0.6571433745595355,
+        -0.7537656036676826,
+        0.0
+      ],
+      "thickness": 0.12,
+      "zOrder": 90
+    },
+    {
+      "id": "F1_window_59",
+      "type": "window",
+      "x": 25.15,
+      "y": 18.02,
+      "width": 1.2,
+      "height": 0.24,
+      "rotation": 0.0,
+      "room_id": "room_dummy_623a44",
+      "anchor": "min",
+      "forward": [
+        0.0,
+        -1.0,
+        0.0
+      ],
+      "thickness": 0.24,
+      "zOrder": 90
+    },
+    {
+      "id": "F1_window_60",
+      "type": "window",
+      "x": 10.32,
+      "y": 18.02,
+      "width": 1.2,
+      "height": 0.24,
+      "rotation": 0.0,
+      "room_id": "room_005",
+      "anchor": "min",
+      "forward": [
+        0.8289140396145426,
+        -0.5593760049643715,
+        0.0
+      ],
+      "thickness": 0.24,
+      "zOrder": 90
+    },
+    {
+      "id": "F1_window_61",
+      "type": "window",
+      "x": 12.78,
+      "y": 18.02,
+      "width": 1.2,
+      "height": 0.24,
+      "rotation": 0.0,
+      "room_id": "room_005",
+      "anchor": "min",
+      "forward": [
+        0.4428700163103333,
+        -0.8965858289384709,
+        0.0
+      ],
+      "thickness": 0.24,
+      "zOrder": 90
+    },
+    {
+      "id": "F1_window_62",
+      "type": "window",
+      "x": 15.22,
+      "y": 18.02,
+      "width": 1.2,
+      "height": 0.24,
+      "rotation": 0.0,
+      "room_id": "room_005",
+      "anchor": "min",
+      "forward": [
+        -0.4428700163103333,
+        -0.8965858289384709,
+        0.0
+      ],
+      "thickness": 0.24,
+      "zOrder": 90
+    },
+    {
+      "id": "F1_window_63",
+      "type": "window",
+      "x": 17.67,
+      "y": 18.02,
+      "width": 1.2,
+      "height": 0.24,
+      "rotation": 0.0,
+      "room_id": "room_005",
+      "anchor": "min",
+      "forward": [
+        -0.8289140396145424,
+        -0.5593760049643716,
+        0.0
+      ],
+      "thickness": 0.24,
+      "zOrder": 90
+    },
+    {
+      "id": "F1_window_64",
+      "type": "window",
+      "x": 0.0,
+      "y": 16.36,
+      "width": 0.24,
+      "height": 1.2,
+      "rotation": 0.0,
+      "room_id": "room_004",
+      "anchor": "min",
+      "forward": [
+        0.9642444717337889,
+        -0.2650143368401534,
+        0.0
+      ],
+      "thickness": 0.24,
+      "zOrder": 90
+    },
+    {
+      "id": "F1_window_65",
+      "type": "window",
+      "x": 0.0,
+      "y": 13.76,
+      "width": 0.24,
+      "height": 1.2,
+      "rotation": 0.0,
+      "room_id": "room_004",
+      "anchor": "min",
+      "forward": [
+        0.9642444717337889,
+        0.26501433684015346,
+        0.0
+      ],
+      "thickness": 0.24,
+      "zOrder": 90
+    },
+    {
+      "id": "F1_window_66",
+      "type": "window",
+      "x": 0.0,
+      "y": 8.56,
+      "width": 0.24,
+      "height": 1.2,
+      "rotation": 0.0,
+      "room_id": "room_001",
+      "anchor": "min",
+      "forward": [
+        0.9865043323479754,
+        -0.16373515889592968,
+        0.0
+      ],
+      "thickness": 0.24,
+      "zOrder": 90
+    },
+    {
+      "id": "F1_window_67",
+      "type": "window",
+      "x": 0.0,
+      "y": 6.16,
+      "width": 0.24,
+      "height": 1.2,
+      "rotation": 0.0,
+      "room_id": "room_001",
+      "anchor": "min",
+      "forward": [
+        0.9865043323479754,
+        0.16373515889592943,
+        0.0
+      ],
+      "thickness": 0.24,
+      "zOrder": 90
+    },
+    {
+      "id": "F1_window_68",
+      "type": "window",
+      "x": 20.13,
+      "y": 18.02,
+      "width": 1.2,
+      "height": 0.24,
+      "rotation": 0.0,
+      "room_id": "room_007",
+      "anchor": "min",
+      "forward": [
+        0.4428700163103328,
+        -0.8965858289384712,
+        0.0
+      ],
+      "thickness": 0.24,
+      "zOrder": 90
+    },
+    {
+      "id": "F1_window_69",
+      "type": "window",
+      "x": 22.57,
+      "y": 18.02,
+      "width": 1.2,
+      "height": 0.24,
+      "rotation": 0.0,
+      "room_id": "room_007",
+      "anchor": "min",
+      "forward": [
+        -0.4428700163103328,
+        -0.8965858289384712,
+        0.0
+      ],
+      "thickness": 0.24,
+      "zOrder": 90
+    }
+  ],
+  "sceneId": "building_floor_plan"
+}

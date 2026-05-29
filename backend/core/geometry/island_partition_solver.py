@@ -812,6 +812,12 @@ class SemanticIslandPartitionSolver:
                 "area_tolerance": max(float(self.config.area_tolerance), 0.20),
                 "aspect_relax_factor": 1.15,
             },
+            {
+                "name": "soft_corridor_access",
+                "corridor_mode": "soft",
+                "area_tolerance": max(float(self.config.area_tolerance), 0.20),
+                "aspect_relax_factor": 1.15,
+            },
         ]
 
         results: List[RoomResult] = []
@@ -820,6 +826,9 @@ class SemanticIslandPartitionSolver:
 
         for attempt in attempts:
             try:
+                orig_real_corridor_reward = int(getattr(self.config, "real_corridor_reward", 0) or 0)
+                if str(attempt.get("corridor_mode", "") or "").lower() == "soft":
+                    self.config.real_corridor_reward = max(orig_real_corridor_reward, 20000)
                 t1 = time.perf_counter()
                 results, dropped_rooms = self._solve_cpsat(
                     warm_start,
@@ -862,6 +871,11 @@ class SemanticIslandPartitionSolver:
                 last_error = e
                 logger.warning("Semantic MIQP attempt errored (attempt=%s, reason=%s)", attempt["name"], e)
                 break
+            finally:
+                try:
+                    self.config.real_corridor_reward = orig_real_corridor_reward
+                except Exception:
+                    pass
 
         if not solved:
             logger.warning(
@@ -1011,8 +1025,11 @@ class SemanticIslandPartitionSolver:
         tol = float(self.config.area_tolerance if area_tolerance is None else area_tolerance)
         for i, room in enumerate(self.rooms):
             target_s = int(room.target_area * SCALE * SCALE)
-            model.Add(area[i] >= int(target_s * (1 - tol)))
-            model.Add(area[i] <= int(target_s * (1 + tol)))
+            tol_i = tol
+            if getattr(room, "is_dummy", False):
+                tol_i = max(tol_i, float(getattr(self.config, "dummy_area_tolerance", tol_i)))
+            model.Add(area[i] >= int(target_s * (1 - tol_i)))
+            model.Add(area[i] <= int(target_s * (1 + tol_i)))
 
         # 约束 3b: 总面积覆盖率
         total_island_area_s = int(self.island.area * SCALE * SCALE)
@@ -1136,11 +1153,85 @@ class SemanticIslandPartitionSolver:
         for i, room in enumerate(self.rooms):
             if room.room_type in ("corridor", "hallway", "passage"):
                 continue
+            if getattr(room, "is_dummy", False):
+                continue
             ar_pen = model.NewIntVar(0, max(W_s, D_s), f"ar_pen_{i}")
             ar_diff = model.NewIntVar(-max(W_s, D_s), max(W_s, D_s), f"ar_diff_{i}")
             model.Add(ar_diff == w[i] - d[i])
             model.AddAbsEquality(ar_pen, ar_diff)
             objectives.append(ar_pen * self.config.weight_aspect_ratio)
+
+        # 目标 4b: Dummy 贴外墙惩罚（避免挡住真实房间采光面）
+        dummy_facade_penalty = int(getattr(self.config, "dummy_facade_penalty", 0) or 0)
+        if dummy_facade_penalty > 0:
+            for i, room in enumerate(self.rooms):
+                if not getattr(room, "is_dummy", False):
+                    continue
+                touches = []
+                if "west" in self.context.exterior_walls:
+                    t = model.NewBoolVar(f"dummy_touch_west_{i}")
+                    model.Add(x[i] == 0).OnlyEnforceIf(t)
+                    model.Add(x[i] > 0).OnlyEnforceIf(t.Not())
+                    touches.append(t)
+                if "east" in self.context.exterior_walls:
+                    t = model.NewBoolVar(f"dummy_touch_east_{i}")
+                    model.Add(x_end[i] == W_s).OnlyEnforceIf(t)
+                    model.Add(x_end[i] < W_s).OnlyEnforceIf(t.Not())
+                    touches.append(t)
+                if "south" in self.context.exterior_walls:
+                    t = model.NewBoolVar(f"dummy_touch_south_{i}")
+                    model.Add(y[i] == 0).OnlyEnforceIf(t)
+                    model.Add(y[i] > 0).OnlyEnforceIf(t.Not())
+                    touches.append(t)
+                if "north" in self.context.exterior_walls:
+                    t = model.NewBoolVar(f"dummy_touch_north_{i}")
+                    model.Add(y_end[i] == D_s).OnlyEnforceIf(t)
+                    model.Add(y_end[i] < D_s).OnlyEnforceIf(t.Not())
+                    touches.append(t)
+                if touches:
+                    any_touch = model.NewBoolVar(f"dummy_touch_any_{i}")
+                    model.AddMaxEquality(any_touch, touches)
+                    objectives.append(any_touch * dummy_facade_penalty)
+
+        real_corridor_reward = int(getattr(self.config, "real_corridor_reward", 0) or 0)
+        dummy_corridor_penalty = int(getattr(self.config, "dummy_corridor_penalty", 0) or 0)
+        if self.corridor_edges and (real_corridor_reward != 0 or dummy_corridor_penalty != 0):
+            TOUCH_THRESHOLD = 10
+            for i, room in enumerate(self.rooms):
+                is_dummy = bool(getattr(room, "is_dummy", False))
+                needs_access = bool(getattr(room, "needs_corridor_access", True))
+                rtype = (room.room_type or "").lower()
+                if rtype in ("corridor", "hallway", "passage"):
+                    continue
+                touches = []
+                if "south" in self.corridor_edges:
+                    t = model.NewBoolVar(f"obj_touch_south_{i}")
+                    model.Add(y[i] <= TOUCH_THRESHOLD).OnlyEnforceIf(t)
+                    model.Add(y[i] > TOUCH_THRESHOLD).OnlyEnforceIf(t.Not())
+                    touches.append(t)
+                if "north" in self.corridor_edges:
+                    t = model.NewBoolVar(f"obj_touch_north_{i}")
+                    model.Add(y_end[i] >= D_s - TOUCH_THRESHOLD).OnlyEnforceIf(t)
+                    model.Add(y_end[i] < D_s - TOUCH_THRESHOLD).OnlyEnforceIf(t.Not())
+                    touches.append(t)
+                if "west" in self.corridor_edges:
+                    t = model.NewBoolVar(f"obj_touch_west_{i}")
+                    model.Add(x[i] <= TOUCH_THRESHOLD).OnlyEnforceIf(t)
+                    model.Add(x[i] > TOUCH_THRESHOLD).OnlyEnforceIf(t.Not())
+                    touches.append(t)
+                if "east" in self.corridor_edges:
+                    t = model.NewBoolVar(f"obj_touch_east_{i}")
+                    model.Add(x_end[i] >= W_s - TOUCH_THRESHOLD).OnlyEnforceIf(t)
+                    model.Add(x_end[i] < W_s - TOUCH_THRESHOLD).OnlyEnforceIf(t.Not())
+                    touches.append(t)
+                if not touches:
+                    continue
+                any_touch = model.NewBoolVar(f"obj_touch_any_{i}")
+                model.AddMaxEquality(any_touch, touches)
+                if (not is_dummy) and needs_access and real_corridor_reward > 0:
+                    objectives.append(any_touch * (-real_corridor_reward))
+                if is_dummy and dummy_corridor_penalty > 0:
+                    objectives.append(any_touch * dummy_corridor_penalty)
 
         # 目标 5: 覆盖率（非矩形岛屿时作为软目标，最大化总面积）
         if not is_rectangular:
@@ -1333,6 +1424,8 @@ class SemanticIslandPartitionSolver:
                 continue
             if mode == "strong_only" and (not self._is_strong_corridor_dependency(room)):
                 dropped_rooms.append(room.room_id)
+                continue
+            if mode == "soft":
                 continue
 
             touches_any_corridor = []

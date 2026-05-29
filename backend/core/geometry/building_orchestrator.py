@@ -59,12 +59,16 @@ class BuildingOrchestrator:
         corridor_width: float = 2.0,
         core_area_ratio: float = 0.08,
         corridor_layout: str = "door_side",
+        base_seed: Optional[int] = None,
+        corridor_grouping: str = "standard",
     ):
         self.floor_boundary = floor_boundary
         self.config = config or SolverConfig()
         self.corridor_width = corridor_width
         self.core_area_ratio = core_area_ratio
         self.corridor_layout = corridor_layout
+        self.base_seed = base_seed
+        self.corridor_grouping = corridor_grouping
         self._shared_core_tube: Optional[CoreTube] = None
 
     def generate(
@@ -82,6 +86,31 @@ class BuildingOrchestrator:
         floor_layouts: Dict[str, LayoutResultV2] = {}
         warnings: List[str] = []
 
+        import hashlib
+
+        total_floors = int(getattr(allocation, "total_floors", 0) or len(allocation.floors))
+
+        group_seed_cache: Dict[str, int] = {}
+
+        def _group_seed_for_floor(f: FloorAllocation) -> Optional[int]:
+            if str(self.corridor_layout or "").lower() != "organic":
+                return None
+            base = int(self.base_seed or 0)
+            fn = int(getattr(f, "floor_number", 0) or 0)
+            if str(self.corridor_grouping or "").lower() == "by_function_tag":
+                tag = str(getattr(f, "floor_function_tag", "") or "unknown")
+                if fn in (1, total_floors):
+                    key = f"special:{fn}:{tag}"
+                else:
+                    key = f"tag:{tag}"
+                if key not in group_seed_cache:
+                    h = hashlib.md5(key.encode("utf-8")).hexdigest()[:8]
+                    group_seed_cache[key] = base + int(h, 16)
+                return group_seed_cache[key]
+            if fn in (1, total_floors):
+                return base + fn
+            return base + 1000
+
         for i, floor in enumerate(allocation.floors):
             floor_id = f"F{floor.floor_number}"
 
@@ -96,15 +125,20 @@ class BuildingOrchestrator:
             adjacency_graph = self._build_adjacency_graph(room_specs)
 
             # 生成布局
+            group_seed = _group_seed_for_floor(floor)
+            corridor_width = float(self.corridor_width)
+            if str(self.corridor_layout or "").lower() == "organic":
+                corridor_width = float(min(max(corridor_width, 1.5), 1.8))
             layout = generate_layout_v2(
                 floor_boundary=self.floor_boundary,
                 room_specs=room_specs,
                 adjacency_graph=adjacency_graph,
                 config=self.config,
-                corridor_width=self.corridor_width,
+                corridor_width=corridor_width,
                 core_area_ratio=self.core_area_ratio,
                 corridor_layout=self.corridor_layout,
                 shared_core_tube=self._shared_core_tube,
+                group_seed=group_seed,
             )
 
             # 首层锁定核心筒

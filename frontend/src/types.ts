@@ -67,14 +67,14 @@ export enum ElementType {
 export interface LayoutElement {
   id: string;
   type: ElementType | string; // Allow string for backward compatibility/flexibility
-  x: number;
-  y: number;
+  x: number; // 屏幕坐标系：原点左上，x→右
+  y: number; // 屏幕坐标系：原点左上，y→下
   width: number;
   height: number;
-  rotation?: number; // Degrees
+  rotation?: number; // Degrees (CW around center)
   label?: string;
   subType?: string; // For things like 'lane_line' direction
-  forward?: [number, number, number]; // 车位指向行车道的方向向量，右/下/上/左为主轴
+  forward?: [number, number, number]; // 朝向单位向量；坐标系：X-Y 为平面，Z 为竖直；水平朝向通常 z=0
   polygon?: [number, number][]; // 精确多边形轮廓（优先于矩形渲染）
 }
 
@@ -195,7 +195,7 @@ export interface DoorV2 {
   connects: string[];
   rotation?: number;               // 0=水平, 90=垂直
   thickness?: number;
-  forward?: [number, number, number];
+  forward?: [number, number, number]; // 朝向单位向量；坐标系：X-Y 为平面，Z 为竖直；水平朝向通常 z=0
 }
 
 export interface WindowV2 {
@@ -204,7 +204,7 @@ export interface WindowV2 {
   room_id: string;
   rotation?: number;
   thickness?: number;
-  forward?: [number, number, number];
+  forward?: [number, number, number]; // 朝向单位向量；坐标系：X-Y 为平面，Z 为竖直；水平朝向通常 z=0
 }
 
 export interface DegradationSummary {

@@ -411,8 +411,10 @@ logger.info(
 
 ### 3.1 门窗定位与“朝向 forward”（当前实现）
 
+坐标系约定：X-Y 为地面平面，Z 为竖直高度；因此 `forward` 为水平朝向向量，通常满足 `forward[2] == 0`。
+
 当前代码未实现“射线法/辐射度”的采光向量场；窗户的 `forward` 由几何规则确定：
-- 若由 wall 段生成：按墙旋转（水平墙 forward=(0,0,1)，垂直墙 forward=(1,0,0)）
+- 若由 wall 段生成：按墙旋转（水平墙 forward=(0,1,0)，垂直墙 forward=(1,0,0)）
 - 若由 floor bounds 推导：`forward` 指向房间中心（`_normalize_2d(cx-x, cy-wy)`）
 
 关键代码（原样拷贝，`generate_windows_from_floor_boundary`）：
@@ -428,7 +430,7 @@ windows.append(WindowPlacement(
     wall_length=round(float(wall_len), 2),
     rotation=90.0,
     thickness=float(exterior_thickness),
-    forward=(float(fx), 0.0, float(fy)),
+    forward=(float(fx), float(fy), 0.0),
 ))
 ```
 
@@ -511,6 +513,7 @@ model.Minimize(sum(dx_vars.values()) + sum(dy_vars.values()))
 
 - 本地渲染输入：`layout.json`（必须含 `width/height/elements[]`）
 - 渲染模式：`mode in {"seg","cad"}`
+- 坐标系约定：原点左上；X 向右为正；Y 向下为正；rect 的 `x/y` 为左上角；`rotation` 为顺时针为正且绕元素中心；polygon 点为全局坐标
 
 关键代码（原样拷贝，`scripts/local_renderer.py`）：
 

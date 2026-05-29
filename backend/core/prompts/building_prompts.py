@@ -124,9 +124,17 @@ BUILDING_STEP1_SYSTEM_PROMPT = """
 1. 输出纯 JSON，禁止 markdown/解释/注释
 2. room_id 格式：room_001, room_002, ...（同层连续编号）
 3. zone 只能是：public / private / service / circulation
-4. room_type 常用值：living_room, dining_room, kitchen, bedroom, master_bedroom, bathroom, study, storage, utility, corridor, entrance, reception
-5. 每层必须有 floor_number, floor_function_tag, floor_total_area, core_tube_area, corridor_allowance_area
-6. floor_total_area = core_tube_area + corridor_allowance_area + 预估房间面积总和
+4. 每层必须有 floor_number, floor_function_tag, floor_total_area, core_tube_area, corridor_allowance_area
+5. floor_total_area = core_tube_area + corridor_allowance_area + 预估房间面积总和
+
+【room_type 白名单（严格）】
+你生成的 room_type 必须来自以下白名单，禁止创造白名单之外的类型：
+  公共空间：living_room, dining_room, kitchen, lobby, lounge, activity_room, waiting_area, playroom
+  私密空间：bedroom, master_bedroom, study, bathroom, office, meeting_room, classroom, reading_room
+  服务空间：storage, utility, pantry, phone_booth
+  交通空间：corridor, entrance
+若功能不在白名单内，请映射到物理属性最相近的类型（如"前台"→"lobby"，"画室"→"classroom"，"走廊"→"corridor"）。
+room_type 必须使用下划线连接的小写英文单词组合。
 
 【垂直分区】
 - 低层：公共功能（大堂/商业/接待）

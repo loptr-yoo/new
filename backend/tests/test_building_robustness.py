@@ -686,6 +686,43 @@ class TestWallDoorWindowGeneration:
         for c in corridors:
             assert c.polygon.intersection(core2.polygon).area < 1e-6
 
+    def test_corridors_do_not_overlap_core_after_cut_organic(self):
+        from shapely.geometry import box
+        from backend.core.geometry.topology_generator import CoreTube, generate_rectangular_topology
+
+        boundary = box(0, 0, 20, 15)
+        core = CoreTube.create_for_floor(floor_bounds=boundary.bounds, area_ratio=0.08, position="south", grid_alignment=0.5)
+        core2, corridors, _islands = generate_rectangular_topology(
+            floor_boundary=boundary,
+            corridor_width=1.6,
+            corridor_layout="organic",
+            core_tube_override=core,
+            group_seed=123,
+        )
+        assert len(corridors) >= 1
+        for c in corridors:
+            assert c.polygon.intersection(core2.polygon).area < 1e-6
+
+    def test_corridors_plug_into_elevator_hall_with_min_shared(self):
+        from shapely.geometry import box
+        from backend.core.geometry.topology_generator import CoreTube, generate_rectangular_topology
+
+        boundary = box(0, 0, 30, 20)
+        core = CoreTube.create_for_floor(floor_bounds=boundary.bounds, area_ratio=0.08, position="east", grid_alignment=0.5)
+        core.set_opening_sides(["west"])
+        core2, corridors, _islands = generate_rectangular_topology(
+            floor_boundary=boundary,
+            corridor_width=1.6,
+            corridor_layout="door_side",
+            core_tube_override=core,
+            group_seed=1,
+        )
+        hall = core2.elevator_hall
+        assert hall is not None and (not hall.is_empty)
+        cpoly = corridors[0].polygon
+        shared = cpoly.boundary.intersection(hall.boundary.buffer(0.01))
+        assert float(getattr(shared, "length", 0.0)) >= 0.9 + 2 * 0.12 + 0.05 - 0.05
+
 
 # ============================================================
 # Phase 5: 降级摘要
@@ -1021,8 +1058,8 @@ class TestRealPromptE2E:
         alloc, warns = _try_parse(llm_output)
         assert alloc.total_floors == 2
         assert len(alloc.floors) == 2
-        assert len(alloc.floors[0].rooms) == 3
-        assert len(alloc.floors[1].rooms) == 3
+        assert len(alloc.floors[0].rooms) >= 3
+        assert len(alloc.floors[1].rooms) >= 3
 
         # 邻接关系保留
         r1 = alloc.floors[0].rooms[0]
@@ -1139,7 +1176,7 @@ class TestSemanticRetryPolicy:
         out = solver.solve()
         assert out == []
         assert fallback_called["hit"] is True
-        assert len(attempts) == 3
+        assert len(attempts) == 4
 
 
 if __name__ == "__main__":

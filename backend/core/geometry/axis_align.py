@@ -15,6 +15,11 @@ from shapely.geometry import Polygon
 
 logger = logging.getLogger(__name__)
 
+try:
+    from shapely.validation import make_valid  # type: ignore[attr-defined]
+except Exception:  # pragma: no cover
+    make_valid = None  # type: ignore[assignment]
+
 
 def snap_to_grid(
     cells: List[Polygon],
@@ -49,7 +54,14 @@ def snap_to_grid(
         try:
             poly = Polygon(snapped_coords)
             if not poly.is_valid:
-                poly = poly.buffer(0)
+                if make_valid is not None:
+                    fixed = make_valid(poly)
+                    if isinstance(fixed, Polygon):
+                        poly = fixed
+                    elif hasattr(fixed, "geoms"):
+                        polys = [g for g in fixed.geoms if isinstance(g, Polygon) and (not g.is_empty)]
+                        if polys:
+                            poly = max(polys, key=lambda g: float(g.area))
             if poly.is_empty:
                 results.append(cell)  # fallback to original
             else:

@@ -78,6 +78,7 @@ def test_hall_hall_door_hard_takeover_has_required_fields() -> None:
     assert d.thickness > 0
     assert d.forward is not None
     assert len(d.forward) == 3
+    assert abs(float(d.forward[2])) <= 1e-6
     assert abs(float(d.rotation)) in (0.0, 90.0)
 
 
@@ -119,4 +120,3 @@ def test_single_sided_cap_wall_kept_when_shaft_gap_large() -> None:
         wall_thickness=0.12,
     )
     assert any(w.type == "partition_wall" and (w.room_ids or []) == ["core_elevator_shaft"] for w in walls)
-

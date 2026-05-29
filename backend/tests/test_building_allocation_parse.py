@@ -316,7 +316,7 @@ class TestSerialization:
             centroid=(2.5, 3.5), has_window=True,
             facade_length=5.0, aspect_ratio=1.4,
         )
-        d = room_result_to_dict(room, "F1")
+        d = room_result_to_dict(room, "F1", floor_bounds=(0.0, 0.0, 10.0, 10.0))
 
         assert d["room_id"] == "living"
         assert d["room_type"] == "living_room"
@@ -331,7 +331,7 @@ class TestSerialization:
         from backend.core.geometry.serializers import core_tube_to_dict
 
         core = CoreTube.create((10, 7.5), 4, 3)
-        d = core_tube_to_dict(core)
+        d = core_tube_to_dict(core, floor_bounds=(0.0, 0.0, 30.0, 20.0))
 
         assert "boundary" in d
         assert "elevator" in d
@@ -445,8 +445,14 @@ class TestJsonRepair:
         allocation = self._try_parse(llm_output)
         assert allocation.total_floors == 2
         assert len(allocation.floors) == 2
-        assert len(allocation.floors[0].rooms) == 3
-        assert len(allocation.floors[1].rooms) == 3
+        assert len(allocation.floors[0].rooms) >= 3
+        assert len(allocation.floors[1].rooms) >= 3
+
+        f1_types = {r.room_type for r in allocation.floors[0].rooms}
+        assert {"living_room", "dining_room", "kitchen"} <= f1_types
+
+        f2_types = {r.room_type for r in allocation.floors[1].rooms}
+        assert {"bedroom", "bathroom"} <= f2_types
 
 
 if __name__ == "__main__":

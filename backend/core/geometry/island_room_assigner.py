@@ -11,6 +11,8 @@
 from __future__ import annotations
 
 import logging
+import math
+import hashlib
 from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set, Tuple
@@ -40,6 +42,14 @@ class AssignerConfig:
     max_utilization: float = 0.9
     area_tolerance: float = 0.85  # 面积容量检查的容差
     capacity_ratio: float = 0.95  # 总面积预检查比例
+
+    hole_fill_enabled: bool = True
+    hole_ratio_threshold: float = 0.10
+    dummy_room_type: str = "utility"
+    dummy_id_prefix: str = "room_dummy_"
+    dummy_min_area: float = 2.0
+    dummy_max_area: float = 15.0
+    dummy_fill_utilization: float = 0.98
 
 
 @dataclass
@@ -84,6 +94,7 @@ class IslandRoomAssigner:
         self.rooms = {r.room_id: r for r in rooms}
         self.adjacency = adjacency_graph
         self.config = config or AssignerConfig()
+        self._overall_utilization: float = 0.0
 
         # 分配结果
         self.assignments: Dict[str, List[str]] = defaultdict(list)
@@ -123,6 +134,7 @@ class IslandRoomAssigner:
             )
             for room in self.rooms.values():
                 room.target_area *= scale_factor
+            total_room_area = sum(r.target_area for r in self.rooms.values())
         elif total_room_area < total_island_area * 0.7:
             max_island = max(i.area for i in self.islands.values())
             max_room = max(r.target_area for r in self.rooms.values()) if self.rooms else 1
@@ -135,12 +147,19 @@ class IslandRoomAssigner:
                 )
                 for room in self.rooms.values():
                     room.target_area *= scale_factor
+                total_room_area = sum(r.target_area for r in self.rooms.values())
 
         # round-up 保护：缩放后面积不低于 min_width × min_depth
         for room in self.rooms.values():
             min_viable = room.min_width * room.min_depth
             if room.target_area < min_viable:
                 room.target_area = min_viable
+
+        self._overall_utilization = (
+            float(total_room_area) / float(total_island_area)
+            if total_island_area > 1e-9
+            else 0.0
+        )
 
         # 按优先级排序
         sorted_rooms = self._sort_rooms()
@@ -178,7 +197,95 @@ class IslandRoomAssigner:
             best = self._select_best_island(room, candidates)
             self._assign_room(room, best)
 
+        self._inject_dummy_rooms(degradation)
         return self._build_results(), degradation
+
+    def _inject_dummy_rooms(self, degradation: DegradationSummary) -> None:
+        cfg = self.config
+        if not cfg.hole_fill_enabled:
+            return
+        if float(self._overall_utilization) < float(cfg.min_utilization):
+            return
+
+        for island_id, island in sorted(self.islands.items(), key=lambda kv: str(kv[0])):
+            if island.area <= 1e-9:
+                continue
+            assigned_ids = self.assignments.get(island_id, [])
+            if not assigned_ids:
+                continue
+            remaining = max(0.0, float(island.remaining_capacity))
+            delta = remaining / float(island.area)
+            if delta < float(cfg.hole_ratio_threshold):
+                continue
+
+            placed = float(island.area) - remaining
+            target_total = float(island.area) * float(cfg.dummy_fill_utilization)
+            rem = max(0.0, target_total - placed)
+
+            allow_micro = False
+            if rem < float(cfg.dummy_min_area):
+                if rem <= 1e-6:
+                    continue
+                allow_micro = True
+                areas = [rem]
+            else:
+                n = max(1, int(math.ceil(rem / float(cfg.dummy_max_area))))
+                while n > 1 and (rem / n) < float(cfg.dummy_min_area):
+                    n -= 1
+
+                per = rem / n
+                if per < float(cfg.dummy_min_area):
+                    per = rem
+                    n = 1
+
+                areas = [per] * n
+                areas[-1] = rem - per * (n - 1)
+                if areas[-1] < float(cfg.dummy_min_area) and n > 1:
+                    n -= 1
+                    per = rem / n
+                    areas = [per] * n
+                    areas[-1] = rem - per * (n - 1)
+
+            total_injected = 0.0
+            injected_index = 0
+            for a in areas:
+                a = float(a)
+                if (not allow_micro) and a < float(cfg.dummy_min_area):
+                    continue
+                seed = f"{island_id}_dummy_{injected_index}"
+                rid = f"{cfg.dummy_id_prefix}{hashlib.md5(seed.encode('utf-8')).hexdigest()[:6]}"
+                while rid in self.rooms:
+                    injected_index += 1
+                    seed = f"{island_id}_dummy_{injected_index}"
+                    rid = f"{cfg.dummy_id_prefix}{hashlib.md5(seed.encode('utf-8')).hexdigest()[:6]}"
+                dummy = RoomSpec(
+                    room_id=rid,
+                    room_type=str(cfg.dummy_room_type),
+                    target_area=a,
+                    min_width=0.1 if allow_micro else 1.0,
+                    min_depth=0.1 if allow_micro else 1.0,
+                    aspect_ratio_range=(0.2, 5.0),
+                    zone=ZoneType.SERVICE,
+                    needs_window=False,
+                    needs_corridor_access=False,
+                    is_dummy=True,
+                    target_area_raw=a,
+                )
+                self.rooms[rid] = dummy
+                self.assignments[island_id].append(rid)
+                self.room_to_island[rid] = island_id
+                island.assigned_rooms.append(rid)
+                island.remaining_capacity = max(0.0, float(island.remaining_capacity) - a)
+                total_injected += a
+                injected_index += 1
+
+            if total_injected > 0:
+                msg = (
+                    f"Injected dummy rooms: island={island_id}, "
+                    f"delta={delta:.2f}, injected={total_injected:.1f}m2, parts={len(areas)}"
+                )
+                degradation.parse_warnings.append(msg)
+                logger.warning(msg)
 
     def _sort_rooms(self) -> List[RoomSpec]:
         """
@@ -204,6 +311,9 @@ class IslandRoomAssigner:
         candidates = []
 
         for island in self.islands.values():
+            if bool(getattr(room, "needs_corridor_access", True)) and (not list(getattr(island, "corridor_edges", []) or [])):
+                continue
+
             # 约束 1: 面积足够
             if island.remaining_capacity < room.target_area * self.config.area_tolerance:
                 continue
@@ -226,8 +336,17 @@ class IslandRoomAssigner:
         for island in self.islands.values():
             if island.remaining_capacity > 0:
                 candidates.append(island)
-        # 按剩余容量降序，优先分配到最大的岛屿
-        candidates.sort(key=lambda i: i.remaining_capacity, reverse=True)
+        need_access = bool(getattr(room, "needs_corridor_access", True))
+        if need_access:
+            candidates.sort(
+                key=lambda i: (
+                    bool(list(getattr(i, "corridor_edges", []) or [])),
+                    float(i.remaining_capacity),
+                ),
+                reverse=True,
+            )
+        else:
+            candidates.sort(key=lambda i: i.remaining_capacity, reverse=True)
         return candidates
 
     def _has_forbidden_neighbor(self, room: RoomSpec, island: Island) -> bool:

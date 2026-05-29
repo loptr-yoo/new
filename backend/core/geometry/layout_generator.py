@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import time
+import hashlib
 from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Dict, FrozenSet, List, Optional, Tuple, Union
@@ -103,6 +104,8 @@ class RoomResult:
     has_window: bool
     facade_length: float
     aspect_ratio: float
+    is_dummy: bool = False
+    target_area_raw: Optional[float] = None
 
 
 @dataclass
@@ -436,6 +439,7 @@ def generate_layout_semantic(
                 area_error=1.0, centroid=(0, 0),
                 has_window=False, facade_length=0,
                 aspect_ratio=float("inf"),
+                is_dummy=bool(getattr(spec, "is_dummy", False)),
             ))
             continue
 
@@ -461,6 +465,7 @@ def generate_layout_semantic(
             has_window=facade > 1.0,
             facade_length=facade,
             aspect_ratio=aspect,
+            is_dummy=bool(getattr(spec, "is_dummy", False)),
         ))
 
     total_area = sum(r.area for r in rooms)
@@ -520,6 +525,8 @@ class LayoutResultV2:
 
     # 拓扑边（最终房间层 edge_set）
     edge_set: Dict[FrozenSet[str], str] = field(default_factory=dict)
+
+    corridor_layout: str = ""
 
     @property
     def is_valid(self) -> bool:
@@ -680,6 +687,7 @@ def generate_layout_v2(
     snap_grid: float = 0.1,
     verbose: bool = False,
     shared_core_tube: Optional[Any] = None,  # CoreTube, 跨层共享
+    group_seed: Optional[int] = None,
 ) -> LayoutResultV2:
     """
     生成多岛屿布局（V2 API）
@@ -747,21 +755,30 @@ def generate_layout_v2(
             s.target_area = float(s.target_area) * float(scale)
 
     corridor_width_initial = float(corridor_width)
-    min_cw = 1.2
-    cw_step = 0.2
     max_iter = 5
+
+    layout_l = str(corridor_layout or "").lower()
+    if layout_l == "organic":
+        corridor_width = float(min(max(float(corridor_width), 1.5), 1.8))
+        corridor_width_initial = float(corridor_width)
+        min_cw = float(corridor_width)
+        cw_step = 0.0
+    else:
+        min_cw = 1.2
+        cw_step = 0.2
 
     total_target_room_area = _total_target_area(room_specs)
     eps = 1e-6
-    while True:
-        a_total = float(floor_boundary.area)
-        a_core_est = max(0.0, a_total * float(core_area_ratio))
-        a_corr_est = estimate_corridor_area_upper(floor_boundary, float(corridor_width), corridor_layout)
-        a_island_est = max(eps, a_total - a_core_est - a_corr_est)
-        pressure_est = total_target_room_area / a_island_est
-        if pressure_est <= 1.0 or corridor_width <= min_cw + 1e-6:
-            break
-        corridor_width = max(min_cw, float(corridor_width) - cw_step)
+    if layout_l != "organic":
+        while True:
+            a_total = float(floor_boundary.area)
+            a_core_est = max(0.0, a_total * float(core_area_ratio))
+            a_corr_est = estimate_corridor_area_upper(floor_boundary, float(corridor_width), corridor_layout)
+            a_island_est = max(eps, a_total - a_core_est - a_corr_est)
+            pressure_est = total_target_room_area / a_island_est
+            if pressure_est <= 1.0 or corridor_width <= min_cw + 1e-6:
+                break
+            corridor_width = max(min_cw, float(corridor_width) - cw_step)
 
     acceptable = False
     scaled = False
@@ -782,6 +799,7 @@ def generate_layout_v2(
                 corridor_layout=corridor_layout,
                 entrance_position=entrance_position,
                 core_tube_override=shared_core_tube,
+                group_seed=group_seed,
             )
         except Exception as e:
             raise TopologyError(f"Failed to generate topology: {e}") from e
@@ -824,6 +842,7 @@ def generate_layout_v2(
                     corridor_layout=corridor_layout,
                     entrance_position=entrance_position,
                     core_tube_override=shared_core_tube,
+                    group_seed=group_seed,
                 )
             except Exception as e:
                 raise TopologyError(f"Failed to generate topology: {e}") from e
@@ -881,6 +900,7 @@ def generate_layout_v2(
     # ========== Phase 4: 岛屿内划分 ==========
     all_miqp_results: List[MIQPRoomResult] = []
     all_specs_ordered: List[SemanticRoomSpec] = []
+    void_rooms: List[RoomResult] = []
 
     for island_id, assignment in assignments.items():
         island = islands_by_id[island_id]
@@ -929,6 +949,29 @@ def generate_layout_v2(
                 logger.error(f"Basic solver also failed for {island_id}: {e2}")
                 warnings.append(f"Partition failed completely on {island_id}")
 
+    for island in (islands or []):
+        if island.id in assignments:
+            continue
+        poly = getattr(island, "polygon", None)
+        if poly is None or poly.is_empty:
+            continue
+        rid = f"room_void_{hashlib.md5(str(island.id).encode('utf-8')).hexdigest()[:6]}"
+        void_rooms.append(RoomResult(
+            id=rid,
+            room_type="void",
+            polygon=poly,
+            area=float(poly.area),
+            target_area=float(poly.area),
+            area_error=0.0,
+            centroid=(float(poly.centroid.x), float(poly.centroid.y)),
+            has_window=False,
+            facade_length=0.0,
+            aspect_ratio=float("inf"),
+            is_dummy=True,
+            target_area_raw=float(poly.area),
+        ))
+        warnings.append(f"Empty island converted to void: island={island.id}, room_id={rid}")
+
     # ========== Phase 5: 网格对齐 + 验证 ==========
     cells = [r.polygon for r in all_miqp_results]
     if snap_grid > 0:
@@ -970,6 +1013,9 @@ def generate_layout_v2(
                 area_error=1.0, centroid=(0, 0),
                 has_window=False, facade_length=0,
                 aspect_ratio=float("inf"),
+                is_dummy=bool(getattr(spec, "is_dummy", False)),
+                target_area_raw=float(getattr(spec, "target_area_raw", None) or spec.target_area)
+                if bool(getattr(spec, "is_dummy", False)) else None,
             ))
             continue
 
@@ -995,6 +1041,9 @@ def generate_layout_v2(
             has_window=facade > 1.0,
             facade_length=facade,
             aspect_ratio=aspect,
+            is_dummy=bool(getattr(spec, "is_dummy", False)),
+            target_area_raw=float(getattr(spec, "target_area_raw", None) or spec.target_area)
+            if bool(getattr(spec, "is_dummy", False)) else None,
         ))
 
     # ========== Phase 6: 连通性检查（拓扑 BFS，零浮点缓冲） ==========
@@ -1021,10 +1070,15 @@ def generate_layout_v2(
             rects[c.id] = (float(minx), float(miny), float(maxx - minx), float(maxy - miny))
     room_ids = []
     for r in rooms:
+        if str(getattr(r, "room_type", "") or "").lower() == "void" or bool(getattr(r, "skip_solver", False)):
+            continue
         if not r.polygon.is_empty:
             minx, miny, maxx, maxy = r.polygon.bounds
             rects[r.id] = (float(minx), float(miny), float(maxx - minx), float(maxy - miny))
             room_ids.append(r.id)
+
+    if void_rooms:
+        rooms.extend(void_rooms)
 
     edge_set = _build_edge_set_from_rects(rects, tol=0.06)
     unreachable_zones = check_connectivity_topological(edge_set, list(rects.keys()))
@@ -1042,4 +1096,5 @@ def generate_layout_v2(
         validation=report,
         generation_time_ms=elapsed_ms,
         warnings=warnings,
+        corridor_layout=str(corridor_layout or ""),
     )

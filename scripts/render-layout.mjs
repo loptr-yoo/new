@@ -25,22 +25,39 @@ const colors = {
   pillar: '#94a3b8'
 };
 
-const rects = layout.elements.map(el => {
+const shapes = layout.elements.map(el => {
   const fill = colors[el.type] || '#ff00ff';
-  const x = el.x || 0;
-  const y = el.y || 0;
+  const poly = el.polygon;
+  if (Array.isArray(poly) && poly.length >= 3) {
+    const pts = poly.map(p => `${p[0]},${p[1]}`).join(' ');
+    return `<polygon points="${pts}" fill="${fill}" stroke="none" />`;
+  }
+
   const w = el.width || 0;
   const h = el.height || 0;
+  let x = el.x || 0;
+  let y = el.y || 0;
+  const anchor = el.anchor || 'min';
+  if (anchor === 'center') {
+    x = x - w / 2;
+    y = y - h / 2;
+  }
+
   if (el.type === 'ground_line') {
     return `<line x1="${x}" y1="${y}" x2="${x + w}" y2="${y + h}" stroke="${fill}" stroke-width="2" stroke-dasharray="8,8" />`;
   }
-  return `<rect x="${x}" y="${y}" width="${w}" height="${h}" fill="${fill}" />`;
+
+  const rot = el.rotation || 0;
+  const cx = x + w / 2;
+  const cy = y + h / 2;
+  const transform = rot ? ` transform="rotate(${rot}, ${cx}, ${cy})"` : '';
+  return `<rect x="${x}" y="${y}" width="${w}" height="${h}" fill="${fill}"${transform} />`;
 });
 
 const svg = [
   `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">`,
   `<rect x="0" y="0" width="${width}" height="${height}" fill="#0f172a" />`,
-  rects.join('\n'),
+  shapes.join('\n'),
   `</svg>`
 ].join('\n');
 

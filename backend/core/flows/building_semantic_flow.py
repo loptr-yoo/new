@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import hashlib
 from asyncio import sleep
 from json import JSONDecodeError
 from typing import Dict, List, Optional, Tuple
@@ -11,6 +12,7 @@ from pydantic import ValidationError
 
 from ...models import BuildingAllocation, GenerateSemanticsRequest
 from ...settings import settings
+from ..geometry.room_spec import ROOM_TYPE_DEFAULTS
 from ..llm.provider import ChatMessage, LLMConfig, create_llm_client
 from ..llm.response_parser import ParseOptions, extract_json, parse_ai_response
 from ..llm.retry import call_llm_with_retry
@@ -27,6 +29,131 @@ _DEFAULT_MODEL_BY_PROVIDER: Dict[str, str] = {
     "gemini": "gemini-2.5-pro",
     "deepseek": "deepseek-chat",
 }
+
+
+def _normalize_room_type(raw_type: str) -> str:
+    """
+    将 LLM 输出的非标房间类型映射为标准白名单类型。
+    在房间对象初始化/预处理时调用。
+
+    注意：此映射表仅处理"相似但不规范的词" → "官方新词"的映射。
+    Task 1 已将 phone_booth、waiting_area、utility 等加入 ROOM_TYPE_DEFAULTS，
+    因此本函数只需将变体形式映射到这些已识别的标准类型。
+    已删除所有 key == value 的自我映射条目（未映射类型会通过兜底逻辑原样返回）。
+    """
+    if not raw_type:
+        return "unknown"
+
+    raw = str(raw_type).strip()
+    raw_l = raw.lower().strip()
+
+    has_zh = any("\u4e00" <= ch <= "\u9fff" for ch in raw_l)
+    if has_zh:
+        cleaned = raw_l.replace("间", "").replace("室", "").replace("区", "")
+        raw_l = cleaned if cleaned else raw_l
+
+    mapping = {
+        # office
+        "open_office": "office",
+        "open plan office": "office",
+        "open-plan office": "office",
+        "office_space": "office",
+        "office area": "office",
+        "admin_office": "office",
+        "management_office": "office",
+        # meeting
+        "small_meeting": "meeting_room",
+        "small meeting": "meeting_room",
+        "meeting": "meeting_room",
+        "meeting room": "meeting_room",
+        "conference": "meeting_room",
+        "conference_room": "meeting_room",
+        "large_meeting": "meeting_room",
+        "discussion_room": "meeting_room",
+        "negotiation_room": "meeting_room",
+        "visitor_meeting": "meeting_room",
+        # phone booth
+        "booth": "phone_booth",
+        "phone booth": "phone_booth",
+        "phone_booth": "phone_booth",
+        # pantry
+        "tea_room": "pantry",
+        "tea room": "pantry",
+        "pantry_room": "pantry",
+        # waiting / lobby / reception
+        "waiting": "waiting_area",
+        "waiting area": "waiting_area",
+        "waiting_area": "waiting_area",
+        "foyer": "lobby",
+        "lobby_area": "lobby",
+        "reception": "reception",
+        "front_desk": "reception",
+        "front desk": "reception",
+        "reception_desk": "reception",
+        "reception_hall": "reception",
+        # lounge
+        "lounge_area": "lounge",
+        "lounge area": "lounge",
+        "coffee_lounge": "lounge",
+        "cafe": "lounge",
+        "cafe_lounge": "lounge",
+        # classroom / reading / activity / play
+        "art_room": "classroom",
+        "art room": "classroom",
+        "art_studio": "classroom",
+        "training_room": "classroom",
+        "children_classroom": "classroom",
+        "reading": "reading_room",
+        "activity": "activity_room",
+        "play room": "playroom",
+        # bathroom / storage
+        "restroom": "bathroom",
+        "toilet": "bathroom",
+        "wc": "bathroom",
+        "storage_room": "storage",
+        "storage room": "storage",
+        # utility / back-of-house
+        "linen_room": "utility",
+        "back_of_house": "utility",
+    }
+
+    if raw_l in mapping:
+        mapped = mapping[raw_l]
+    else:
+        if has_zh:
+            zh_map = {
+                "茶水": "pantry",
+                "电话": "phone_booth",
+                "前台": "reception",
+                "接待": "reception",
+                "大堂": "lobby",
+                "门厅": "lobby",
+                "玄关": "entrance",
+                "办公": "office",
+                "会议": "meeting_room",
+                "洽谈": "meeting_room",
+                "咖啡": "lounge",
+                "休闲": "lounge",
+                "后勤": "utility",
+                "设备": "utility",
+                "布草": "utility",
+                "阅读": "reading_room",
+                "活动": "activity_room",
+            }
+            mapped = None
+            for k, v in zh_map.items():
+                if k in raw_l:
+                    mapped = v
+                    break
+            if mapped is None:
+                mapped = raw_l.replace(" ", "_").replace("-", "_")
+        else:
+            mapped = raw_l.replace(" ", "_").replace("-", "_")
+
+    if mapped == "reception" and "reception" not in ROOM_TYPE_DEFAULTS:
+        return "lobby"
+
+    return mapped
 
 
 def _pick_provider_model_and_key(request: GenerateSemanticsRequest) -> Tuple[str, str, str]:
@@ -203,6 +330,15 @@ def _parse_building_allocation(
 
 def _preprocess_allocation(obj: dict, parse_warnings: List[str]) -> None:
     """Pydantic 前智能预处理"""
+    def _safe_float(val, default: float = 0.0) -> float:
+        try:
+            return float(val)
+        except (ValueError, TypeError):
+            return float(default)
+
+    def _estimate_core_area_ratio(total_area: float) -> float:
+        return 0.08 if total_area < 80.0 else 0.12
+
     # 顶层字段补全
     obj.setdefault("building_name", "Building")
     obj.setdefault("total_floors", len(obj.get("floors", [])))
@@ -248,6 +384,21 @@ def _preprocess_allocation(obj: dict, parse_warnings: List[str]) -> None:
             room.setdefault("target_area", 20.0)
             room.setdefault("zone", "public")
             room.setdefault("needs_window", False)
+
+            # 规范化 room_type（仅当 LLM 给出了非默认值时）
+            if room.get("room_type") and room["room_type"] != "room":
+                normalized = _normalize_room_type(room["room_type"])
+                if normalized != room["room_type"]:
+                    parse_warnings.append(
+                        f"F{floor.get('floor_number', '?')}, {room.get('room_id', '?')}: "
+                        f"room_type '{room['room_type']}' → '{normalized}'"
+                    )
+                    room["room_type"] = normalized
+                if normalized and normalized not in ROOM_TYPE_DEFAULTS:
+                    parse_warnings.append(
+                        f"F{floor.get('floor_number', '?')}, {room.get('room_id', '?')}: "
+                        f"room_type '{normalized}' 不在 ROOM_TYPE_DEFAULTS 中，可能发生语义退化"
+                    )
 
             # 类型修复
             if isinstance(room.get("target_area"), str):
@@ -312,6 +463,153 @@ def _preprocess_allocation(obj: dict, parse_warnings: List[str]) -> None:
                             f"{adj_key} 引用 {invalid} 不存在，已移除"
                         )
                         room[adj_key] = [ref for ref in room[adj_key] if ref in room_ids_in_floor]
+
+        floor_total_area = _safe_float(floor.get("floor_total_area"))
+        if floor_total_area > 0:
+            corridor_area = _safe_float(floor.get("corridor_allowance_area", 0.0))
+            floor["corridor_allowance_area"] = corridor_area
+
+            min_corridor = floor_total_area * 0.10
+            max_corridor = floor_total_area * 0.30
+            if corridor_area < min_corridor or corridor_area > max_corridor:
+                corridor_area = floor_total_area * 0.20
+                floor["corridor_allowance_area"] = corridor_area
+                parse_warnings.append(
+                    f"F{floor.get('floor_number', '?')}: corridor_allowance_area 离谱，已修正为 {corridor_area:.1f}㎡"
+                )
+
+            core_ratio = _estimate_core_area_ratio(floor_total_area)
+            core_area_est = floor_total_area * core_ratio
+            core_area_raw = _safe_float(floor.get("core_tube_area", core_area_est), default=core_area_est)
+            if abs(core_area_raw - core_area_est) > max(2.0, floor_total_area * 0.10):
+                floor["core_tube_area"] = core_area_est
+                parse_warnings.append(
+                    f"F{floor.get('floor_number', '?')}: core_tube_area 偏差较大，已按几何规则修正为 {core_area_est:.1f}㎡"
+                )
+            else:
+                floor["core_tube_area"] = core_area_raw
+
+            for room in rooms:
+                if not isinstance(room, dict):
+                    continue
+                room["target_area"] = _safe_float(room.get("target_area", 0.0))
+
+            total_target_area = sum(
+                _safe_float(r.get("target_area", 0.0))
+                for r in rooms
+                if isinstance(r, dict)
+            )
+
+            core_area = _safe_float(floor.get("core_tube_area", 0.0))
+            available_area = floor_total_area - core_area - corridor_area
+            gap = available_area - total_target_area
+
+            if abs(gap) > 1.0:
+                parse_warnings.append(
+                    f"F{floor.get('floor_number', '?')}: 面积不闭环。 "
+                    f"目标 {total_target_area:.1f}㎡ vs 可用 {available_area:.1f}㎡ (差值 {gap:.1f}㎡)"
+                )
+
+            if gap > 5.0:
+                existing_ids = {
+                    r.get("room_id", "") for r in rooms if isinstance(r, dict)
+                }
+                gap_seed = round(float(gap), 2)
+                floor_seed = str(floor.get("floor_number", "?"))
+                idx = 0
+                seed = f"{floor_seed}_filler_utility_{gap_seed}_{idx}"
+                new_room_id = f"room_filler_utility_{hashlib.md5(seed.encode('utf-8')).hexdigest()[:6]}"
+                while new_room_id in existing_ids:
+                    idx += 1
+                    seed = f"{floor_seed}_filler_utility_{gap_seed}_{idx}"
+                    new_room_id = f"room_filler_utility_{hashlib.md5(seed.encode('utf-8')).hexdigest()[:6]}"
+
+                rooms.append(
+                    {
+                        "room_id": new_room_id,
+                        "room_name": "设备间",
+                        "room_type": "utility",
+                        "target_area": round(gap, 2),
+                        "zone": "service",
+                        "needs_window": False,
+                    }
+                )
+                parse_warnings.append(f"F{floor.get('floor_number', '?')}: 已动态注入 {gap:.1f}㎡ 的 utility 占位空间。")
+                gap = 0.0
+            elif (1.0 <= gap <= 5.0) or (gap < -1.0):
+                flexible_types = {
+                    "lobby",
+                    "lounge",
+                    "office",
+                    "activity_room",
+                    "corridor",
+                    "living_room",
+                    "dining_room",
+                }
+                flex_rooms = [
+                    r
+                    for r in rooms
+                    if isinstance(r, dict) and r.get("room_type") in flexible_types
+                ]
+
+                flex_total = sum(
+                    _safe_float(r.get("target_area", 0.0)) for r in flex_rooms
+                )
+                if flex_total > 0:
+                    flex_scale = (flex_total + gap) / flex_total
+                    flex_safe_scale = max(0.7, min(1.3, flex_scale))
+                    for r in flex_rooms:
+                        r["target_area"] = _safe_float(r.get("target_area", 0.0)) * flex_safe_scale
+
+                total_target_area = sum(
+                    _safe_float(r.get("target_area", 0.0))
+                    for r in rooms
+                    if isinstance(r, dict)
+                )
+                gap = available_area - total_target_area
+
+                if abs(gap) > 1.0:
+                    current_total = total_target_area
+                    if current_total > 0:
+                        scale = available_area / current_total
+                        safe_scale = max(0.8, min(1.2, scale))
+                        for r in rooms:
+                            if not isinstance(r, dict):
+                                continue
+                            r["target_area"] = _safe_float(r.get("target_area", 0.0)) * safe_scale
+                    else:
+                        parse_warnings.append(
+                            f"F{floor.get('floor_number', '?')}: 房间总面积为 0，跳过全体缩放，交由模型层兜底"
+                        )
+
+                total_target_area = sum(
+                    _safe_float(r.get("target_area", 0.0))
+                    for r in rooms
+                    if isinstance(r, dict)
+                )
+                gap = available_area - total_target_area
+
+                if abs(gap) > 2.0:
+                    parse_warnings.append(
+                        f"F{floor.get('floor_number', '?')}: 残余面积偏差过大({gap:.1f}㎡)，放弃强行补差，交由模型层全局缩放。"
+                    )
+                elif abs(gap) > 1e-3:
+                    if rooms:
+                        biggest_room = (
+                            max(flex_rooms, key=lambda x: _safe_float(x.get("target_area", 0.0)))
+                            if flex_rooms
+                            else max(
+                                (r for r in rooms if isinstance(r, dict)),
+                                key=lambda x: _safe_float(x.get("target_area", 0.0)),
+                            )
+                        )
+                        candidate = _safe_float(biggest_room.get("target_area", 0.0)) + gap
+                        if candidate < 2.0:
+                            parse_warnings.append(
+                                f"F{floor.get('floor_number', '?')}: 补差会导致房间面积低于 2.0㎡，放弃补差并交由模型层兜底"
+                            )
+                        else:
+                            biggest_room["target_area"] = candidate
 
         # floor_total_area 补全（从 rooms 反推）
         if "floor_total_area" not in floor:

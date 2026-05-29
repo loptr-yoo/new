@@ -86,6 +86,9 @@ def test_generate_doors_whitelist_blocks_core_non_door_face():
     assert all(isinstance(d, DoorPlacement) for d in doors)
     assert len(doors) == 1
     assert doors[0].rotation == 0.0
+    assert doors[0].forward is not None
+    assert len(doors[0].forward) == 3
+    assert abs(float(doors[0].forward[2])) <= 1e-6
 
 
 def test_generate_doors_allows_core_staircase_and_elevator_hall_and_blocks_shaft():

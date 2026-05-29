@@ -76,6 +76,9 @@ class RoomSpec:
     # 交通约束
     needs_corridor_access: bool = True  # 是否需要贴合走廊边界（storage/utility 可为 False）
 
+    is_dummy: bool = False
+    target_area_raw: Optional[float] = None
+
     # 权重
     area_priority: float = 1.0
 
@@ -124,6 +127,7 @@ class SolverConfig:
 
     # 容差
     area_tolerance: float = 0.15  # 面积容差 ±15%
+    dummy_area_tolerance: float = 0.30  # 仅 Dummy：面积容差 ±30%
 
     # 目标函数权重
     weight_area: int = 100  # 面积偏差权重
@@ -131,6 +135,9 @@ class SolverConfig:
     weight_compactness: int = 30  # 分区紧凑度权重
     weight_aspect_ratio: int = 20  # 宽高比惩罚权重
     weight_alignment: int = 10  # 边界对齐奖励权重
+    dummy_facade_penalty: int = 1000
+    real_corridor_reward: int = 2000
+    dummy_corridor_penalty: int = 200
 
     # 约束参数
     min_door_width: float = 0.9  # 最小门宽 (m)，用于邻接共享边判定
@@ -181,6 +188,19 @@ ROOM_TYPE_DEFAULTS: Dict[str, Dict] = {
     "hallway": {"zone": ZoneType.CIRCULATION, "needs_window": False, "ar": (0.2, 5.0)},
     "passage": {"zone": ZoneType.CIRCULATION, "needs_window": False, "ar": (0.2, 5.0)},
     "entrance": {"zone": ZoneType.CIRCULATION, "needs_window": False, "ar": (0.5, 2.0)},
+    # 公建/商业空间（必须靠窗）
+    "office": {"zone": ZoneType.PRIVATE, "needs_window": True, "ar": (0.5, 2.0)},
+    "meeting_room": {"zone": ZoneType.PRIVATE, "needs_window": True, "ar": (0.5, 2.0)},
+    "classroom": {"zone": ZoneType.PRIVATE, "needs_window": True, "ar": (0.6, 1.8)},
+    "reading_room": {"zone": ZoneType.PRIVATE, "needs_window": True, "ar": (0.6, 1.8)},
+    "activity_room": {"zone": ZoneType.PUBLIC, "needs_window": True, "ar": (0.6, 1.8)},
+    "playroom": {"zone": ZoneType.PUBLIC, "needs_window": True, "ar": (0.6, 1.8)},
+    # 内部空间（可不靠窗）
+    "pantry": {"zone": ZoneType.SERVICE, "needs_window": False, "ar": (0.5, 2.0)},
+    "waiting_area": {"zone": ZoneType.PUBLIC, "needs_window": False, "ar": (0.5, 2.0)},
+    "lobby": {"zone": ZoneType.PUBLIC, "needs_window": False, "ar": (0.5, 2.0)},
+    "lounge": {"zone": ZoneType.PUBLIC, "needs_window": False, "ar": (0.5, 2.0)},
+    "phone_booth": {"zone": ZoneType.SERVICE, "needs_window": False, "ar": (0.5, 1.5)},
 }
 
 

@@ -34,7 +34,7 @@ def test_ground_floor_corridor_exterior_door_right_wall() -> None:
     assert len(exterior_doors) == 1
     d = exterior_doors[0]
     assert d.connects == ["corridor_h", "__exterior__"]
-    assert abs(float(d.width) - 0.24) < 1e-6
+    assert abs(float(d.width) - 1.0) < 1e-6
     assert abs(float(d.thickness) - 0.24) < 1e-6
     assert abs(float(d.position[0]) - 9.88) < 1e-2
     assert abs(float(d.rotation) - 90.0) < 1e-6
@@ -69,4 +69,3 @@ def test_non_ground_floor_no_exterior_door() -> None:
     )
     exterior_doors = [d for d in pp.doors if "__exterior__" in (d.connects or [])]
     assert len(exterior_doors) == 0
-

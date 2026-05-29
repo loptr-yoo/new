@@ -9,14 +9,27 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 class LayoutElement(BaseModel):
     id: str
     type: str
-    x: float
-    y: float
+    x: float = Field(description="屏幕坐标系：原点左上，x 向右为正。")
+    y: float = Field(description="屏幕坐标系：原点左上，y 向下为正。")
     width: float
     height: float
-    rotation: Optional[float] = None
+    rotation: Optional[float] = Field(default=None, description="旋转角度（度），顺时针为正，绕元素中心。")
     label: Optional[str] = None
     subType: Optional[str] = None
-    forward: Optional[Tuple[float, float, float]] = None
+    forward: Optional[Tuple[float, float, float]] = Field(
+        default=None,
+        description="朝向单位向量；坐标系：X-Y 为平面，Z 为竖直；水平朝向通常 z=0。",
+    )
+
+    @model_validator(mode="after")
+    def _validate_forward(self) -> "LayoutElement":
+        if self.forward is None:
+            return self
+        if len(self.forward) != 3:
+            raise ValueError("forward 必须是长度为 3 的向量")
+        if abs(float(self.forward[2])) > 1e-6:
+            raise ValueError("在当前契约下，水平朝向 forward 的 Z 分量必须为 0")
+        return self
 
 
 class ParkingLayout(BaseModel):

@@ -161,11 +161,11 @@ def _flatten_floor_to_elements(
 
     # Layer 1: floor slab
     slab_poly = [
-        [round(floor_boundary_width, 2), 0.0],
-        [round(floor_boundary_width, 2), round(floor_boundary_height, 2)],
-        [0.0, round(floor_boundary_height, 2)],
+        [round(float(floor_boundary_width), 4), 0.0],
+        [round(float(floor_boundary_width), 4), round(float(floor_boundary_height), 4)],
+        [0.0, round(float(floor_boundary_height), 4)],
         [0.0, 0.0],
-        [round(floor_boundary_width, 2), 0.0],
+        [round(float(floor_boundary_width), 4), 0.0],
     ]
     elements.append({
         "id": f"{floor_id}_floor_slab",
@@ -173,8 +173,8 @@ def _flatten_floor_to_elements(
         "polygon": slab_poly,
         "x": 0.0,
         "y": 0.0,
-        "width": round(floor_boundary_width, 2),
-        "height": round(floor_boundary_height, 2),
+        "width": round(float(floor_boundary_width), 4),
+        "height": round(float(floor_boundary_height), 4),
         "zOrder": _zorder_for("floor_slab"),
     })
 
@@ -214,6 +214,7 @@ def _flatten_floor_to_elements(
             "width": round(maxx - minx, 2),
             "height": round(maxy - miny, 2),
             "label": room_id,
+            "is_dummy": bool(r.get("is_dummy", False)),
             "zOrder": _zorder_for(room_type),
         })
 
@@ -324,15 +325,15 @@ def _flatten_floor_to_elements(
         elements.append({
             "id": f"{floor_id}_door_{len(elements)}",
             "type": "door",
-            "x": round(float(px), 2),
-            "y": round(float(py), 2),
+            "x": round(float(px) - rect_w / 2.0, 2),
+            "y": round(float(py) - rect_h / 2.0, 2),
             "width": round(rect_w, 2),
             "height": round(rect_h, 2),
             "rotation": 0.0,
             "swing_angle": 90,
             "swing_dir": "left",
             "connects": d.get("connects"),
-            "anchor": "center",
+            "anchor": "min",
             "forward": d.get("forward"),
             "thickness": float(d.get("thickness") or door_depth),
             "zOrder": _zorder_for("door"),
@@ -349,13 +350,13 @@ def _flatten_floor_to_elements(
         elements.append({
             "id": f"{floor_id}_window_{len(elements)}",
             "type": "window",
-            "x": round(float(px), 2),
-            "y": round(float(py), 2),
+            "x": round(float(px) - rect_w / 2.0, 2),
+            "y": round(float(py) - rect_h / 2.0, 2),
             "width": round(rect_w, 2),
             "height": round(rect_h, 2),
             "rotation": 0.0,
             "room_id": wv.get("room_id"),
-            "anchor": "center",
+            "anchor": "min",
             "forward": wv.get("forward"),
             "thickness": float(wv.get("thickness") or window_depth),
             "zOrder": _zorder_for("window"),
@@ -383,18 +384,23 @@ async def _run_async(args: argparse.Namespace) -> int:
     width, height, floor_boundary = _derive_floor_boundary_from_allocation(allocation)
     corridor_width, core_area_ratio = _pick_corridor_width_and_core_ratio(width * height)
 
+    corridor_layout = "door_side"
+    if str(getattr(args, "corridor_mode", "") or "").lower() == "organic":
+        corridor_layout = "organic"
+
     orchestrator = BuildingOrchestrator(
         floor_boundary=floor_boundary,
         corridor_width=corridor_width,
         core_area_ratio=core_area_ratio,
-        corridor_layout="door_side",
+        corridor_layout=corridor_layout,
+        base_seed=getattr(args, "seed", None),
     )
 
     try:
         orchestrator._shared_core_tube = CoreTube.create_for_floor(
             floor_bounds=floor_boundary.bounds,
             area_ratio=core_area_ratio,
-            position=args.core,
+            position=args.core_placement,
         )
     except Exception as e:
         print(f"[cli_runner] core override failed: {type(e).__name__}: {e}", file=sys.stderr)
@@ -429,7 +435,27 @@ def _parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Building V2 headless generator (LLM -> geometry -> layout.json)")
     p.add_argument("-p", "--prompt", required=True, help="提示词 / 用户需求描述")
     p.add_argument("-m", "--model", required=True, help="模型名称（透传到后端 LLM 配置）")
-    p.add_argument("-c", "--core", required=True, choices=["north", "center", "south"], help="核心筒位置")
+    p.add_argument(
+        "-c",
+        "--core",
+        "--core-placement",
+        dest="core_placement",
+        required=True,
+        choices=["north", "center", "south", "east", "west"],
+        help="核心筒位置",
+    )
+    p.add_argument(
+        "--corridor-mode",
+        default="door_side",
+        choices=["door_side", "organic"],
+        help="走廊模式",
+    )
+    p.add_argument(
+        "--seed",
+        default=None,
+        type=int,
+        help="随机种子（用于标准层分组/端头退让；不传则使用默认值）",
+    )
     p.add_argument("-o", "--output", required=True, help="输出 JSON 路径（layout.json）")
     return p.parse_args(argv)
 

@@ -13,14 +13,14 @@ local_renderer.py
 2) 强制墙体永远不透明（alpha=1.0），并在房间之上“盖章”
 3) 通过 zOrder 字段确保图层是数据固有属性（渲染器只读，不猜）
 
-锚点（Anchor）规范：
-- 对于离散型实体（door/window/家具等）采用 rect 表达时，JSON 的 x,y 必须是中心点 (cx, cy)
-- Matplotlib Rectangle 需要左下角坐标，因此渲染时换算为 (cx-w/2, cy-h/2)
-- rotation 围绕中心点旋转（rotate_deg_around）
+坐标系规范：
+- 原点在画布左上角
+- x 向右为正，y 向下为正
+- rotation 围绕元素中心旋转，正角为顺时针（CW）
 
-兼容旧 JSON（可选）：
-- 若 elem 显式声明 anchor="min"，则把 x,y 解释为左下角
-- 若未声明 anchor 且缺少 zOrder（常见于旧导出），默认按左下角处理
+锚点（Anchor）规范：
+- rect 元素默认 anchor="min"：JSON 的 x,y 是左上角（top-left）
+- 兼容旧 JSON：若 elem 显式声明 anchor="center"，则把 x,y 解释为中心点 (cx, cy)
 """
 
 from __future__ import annotations
@@ -397,15 +397,13 @@ def _draw_polygon_seg(ax: Any, elem: Dict[str, Any], elements: List[Dict[str, An
 def _rect_anchor_mode(elem: Dict[str, Any]) -> str:
     """
     返回 'center' 或 'min'。
-    - 新契约：默认 center
-    - 兼容旧 JSON：若缺 zOrder 且未显式 anchor，则默认 min（旧导出通常是左下角坐标）
+    - 新契约：默认 min（top-left）
+    - 兼容旧 JSON：若显式 anchor="center"，则按中心点解析
     """
     a = elem.get("anchor")
     if isinstance(a, str) and a in {"center", "min"}:
         return a
-    if "zOrder" not in elem:
-        return "min"
-    return "center"
+    return "min"
 
 
 def _draw_rect(ax: Any, elem: Dict[str, Any], facecolor: str) -> None:
@@ -640,13 +638,13 @@ def _render(layout: Dict[str, Any], out_path: Path, mode: str) -> None:
         matplotlib.rcParams["lines.antialiased"] = False
         matplotlib.rcParams["patch.antialiased"] = False
         ax.set_xlim(0.0, width)
-        ax.set_ylim(0.0, height)
+        ax.set_ylim(height, 0.0)
         fig.subplots_adjust(left=0.0, right=1.0, bottom=0.0, top=1.0)
         ax.set_position([0.0, 0.0, 1.0, 1.0])
     else:
         padding = 0.5
         ax.set_xlim(0.0 - padding, width + padding)
-        ax.set_ylim(0.0 - padding, height + padding)
+        ax.set_ylim(height + padding, 0.0 - padding)
     ax.set_aspect("equal")
     ax.axis("off")
 

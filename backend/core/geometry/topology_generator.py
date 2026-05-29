@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 
 import numpy as np
+from shapely import affinity
 from shapely.geometry import (
     GeometryCollection,
     LineString,
@@ -19,6 +20,11 @@ from shapely.ops import unary_union
 from .room_spec import ZoneType
 
 logger = logging.getLogger(__name__)
+
+try:
+    from shapely.validation import make_valid  # type: ignore[attr-defined]
+except Exception:  # pragma: no cover
+    make_valid = None  # type: ignore[assignment]
 
 def _as_polygons(geom) -> List[Polygon]:
     """从几何对象中提取所有 Polygon"""
@@ -65,12 +71,30 @@ class CoreTube:
     staircase_shaft: Optional[Polygon] = None
     elevator_hall: Optional[Polygon] = None
     elevator_shaft: Optional[Polygon] = None
+    elevator_hall_b: Optional[Polygon] = None
+    staircase_hall_b: Optional[Polygon] = None
+    opening_sides: List[str] = field(default_factory=lambda: ["south"])
     elevator_area: float = 0.0
     staircase_area: float = 0.0
     staircase_hall_area: float = 0.0
     staircase_shaft_area: float = 0.0
     elevator_hall_area: float = 0.0
     elevator_shaft_area: float = 0.0
+
+    def set_opening_sides(self, opening_sides: List[str]) -> None:
+        sides = [str(s).lower() for s in (opening_sides or []) if str(s).strip()]
+        if not sides:
+            sides = ["south"]
+        seen = set()
+        ordered: List[str] = []
+        for s in sides:
+            if s in ("north", "south", "east", "west") and s not in seen:
+                seen.add(s)
+                ordered.append(s)
+        if not ordered:
+            ordered = ["south"]
+        self.opening_sides = ordered
+        self.build_subzones_from_bounds()
 
     def build_subzones_from_bounds(self) -> None:
         minx, miny, maxx, maxy = self.polygon.bounds
@@ -82,6 +106,8 @@ class CoreTube:
             self.staircase_shaft = None
             self.elevator_hall = None
             self.elevator_shaft = None
+            self.elevator_hall_b = None
+            self.staircase_hall_b = None
             self.elevator = None
             self.staircase_area = 0.0
             self.staircase_hall_area = 0.0
@@ -91,19 +117,147 @@ class CoreTube:
             self.elevator_area = 0.0
             return
 
+        self.elevator_hall_b = None
+        self.staircase_hall_b = None
+
+        sides = [str(s).lower() for s in (self.opening_sides or ["south"])]
+        if len(sides) >= 2:
+            sset = set(sides[:2])
+        else:
+            sset = set(sides)
+
         split_x = minx + 0.4 * w
         stair_split_y = miny + 0.3 * h
-        elev_split_y = miny + 0.5 * h
 
-        staircase_hall = box(minx, miny, split_x, stair_split_y)
-        staircase_shaft = box(minx, stair_split_y, split_x, maxy)
+        if sset == {"west", "east"}:
+            band = 0.25 * w
+            band = max(0.8, min(band, 0.45 * w))
+            cx0 = minx + band
+            cx1 = maxx - band
+            if cx1 <= cx0 + 0.2:
+                sset = {sides[0]}
+            else:
+                stair_hall_w = box(minx, miny, minx + band, stair_split_y)
+                elev_hall_w = box(minx, stair_split_y, minx + band, maxy)
+                stair_hall_e = box(maxx - band, miny, maxx, stair_split_y)
+                elev_hall_e = box(maxx - band, stair_split_y, maxx, maxy)
+
+                staircase_hall = stair_hall_w
+                self.staircase_hall_b = stair_hall_e
+                elevator_hall = elev_hall_w
+                self.elevator_hall_b = elev_hall_e
+
+                staircase_shaft = box(cx0, miny, cx1, stair_split_y)
+                elevator_shaft = box(cx0, stair_split_y, cx1, maxy)
+
+                try:
+                    staircase = unary_union([staircase_hall, staircase_shaft])
+                except Exception:
+                    staircase = staircase_hall
+                try:
+                    elevator = unary_union([elevator_hall, self.elevator_hall_b, elevator_shaft])
+                except Exception:
+                    elevator = elevator_hall
+
+                self.staircase = staircase if isinstance(staircase, Polygon) else staircase_hall
+                self.staircase_hall = staircase_hall
+                self.staircase_shaft = staircase_shaft
+                self.elevator_hall = elevator_hall
+                self.elevator_shaft = elevator_shaft
+                self.staircase_area = float(self.staircase.area) if self.staircase is not None else 0.0
+                self.staircase_hall_area = float(staircase_hall.area)
+                self.staircase_shaft_area = float(staircase_shaft.area)
+                self.elevator_hall_area = float(elevator_hall.area) + float(self.elevator_hall_b.area)
+                self.elevator_shaft_area = float(elevator_shaft.area)
+                self.elevator = elevator
+                try:
+                    self.elevator_area = float(elevator.area)
+                except Exception:
+                    self.elevator_area = float(elevator_hall.area)
+                return
+
+        if sset == {"south", "north"}:
+            band = 0.25 * h
+            band = max(0.8, min(band, 0.45 * h))
+            cy0 = miny + band
+            cy1 = maxy - band
+            if cy1 <= cy0 + 0.2:
+                sset = {sides[0]}
+            else:
+                stair_hall_s = box(minx, miny, split_x, miny + band)
+                elev_hall_s = box(split_x, miny, maxx, miny + band)
+                stair_hall_n = box(minx, maxy - band, split_x, maxy)
+                elev_hall_n = box(split_x, maxy - band, maxx, maxy)
+
+                staircase_hall = stair_hall_s
+                self.staircase_hall_b = stair_hall_n
+                elevator_hall = elev_hall_s
+                self.elevator_hall_b = elev_hall_n
+
+                staircase_shaft = box(minx, cy0, split_x, cy1)
+                elevator_shaft = box(split_x, cy0, maxx, cy1)
+
+                try:
+                    staircase = unary_union([staircase_hall, self.staircase_hall_b, staircase_shaft])
+                except Exception:
+                    staircase = staircase_hall
+                try:
+                    elevator = unary_union([elevator_hall, self.elevator_hall_b, elevator_shaft])
+                except Exception:
+                    elevator = elevator_hall
+
+                self.staircase = staircase if isinstance(staircase, Polygon) else staircase_hall
+                self.staircase_hall = staircase_hall
+                self.staircase_shaft = staircase_shaft
+                self.elevator_hall = elevator_hall
+                self.elevator_shaft = elevator_shaft
+                self.staircase_area = float(self.staircase.area) if self.staircase is not None else 0.0
+                self.staircase_hall_area = float(staircase_hall.area) + float(self.staircase_hall_b.area)
+                self.staircase_shaft_area = float(staircase_shaft.area)
+                self.elevator_hall_area = float(elevator_hall.area) + float(self.elevator_hall_b.area)
+                self.elevator_shaft_area = float(elevator_shaft.area)
+                self.elevator = elevator
+                try:
+                    self.elevator_area = float(elevator.area)
+                except Exception:
+                    self.elevator_area = float(elevator_hall.area)
+                return
+
+        side = next(iter(sset or {"south"}))
+        if side in ("south", "north"):
+            band = 0.35 * h
+            band = max(0.8, min(band, 0.6 * h))
+            if side == "south":
+                hall_y0, hall_y1 = miny, miny + band
+                shaft_y0, shaft_y1 = miny + band, maxy
+            else:
+                hall_y0, hall_y1 = maxy - band, maxy
+                shaft_y0, shaft_y1 = miny, maxy - band
+
+            staircase_hall = box(minx, hall_y0, split_x, hall_y1)
+            elevator_hall = box(split_x, hall_y0, maxx, hall_y1)
+            staircase_shaft = box(minx, shaft_y0, split_x, shaft_y1)
+            elevator_shaft = box(split_x, shaft_y0, maxx, shaft_y1)
+        else:
+            band = 0.35 * w
+            band = max(0.8, min(band, 0.6 * w))
+            if side == "west":
+                hall_x0, hall_x1 = minx, minx + band
+                shaft_x0, shaft_x1 = minx + band, maxx
+            else:
+                hall_x0, hall_x1 = maxx - band, maxx
+                shaft_x0, shaft_x1 = minx, maxx - band
+
+            staircase_hall = box(hall_x0, miny, hall_x1, stair_split_y)
+            elevator_hall = box(hall_x0, stair_split_y, hall_x1, maxy)
+            staircase_shaft = box(shaft_x0, miny, shaft_x1, stair_split_y)
+            elevator_shaft = box(shaft_x0, stair_split_y, shaft_x1, maxy)
+
         try:
             merged_s = unary_union([staircase_hall, staircase_shaft])
             staircase = merged_s if isinstance(merged_s, Polygon) else staircase_hall
         except Exception:
             staircase = staircase_hall
-        elevator_hall = box(split_x, miny, maxx, elev_split_y)
-        elevator_shaft = box(split_x, elev_split_y, maxx, maxy)
 
         self.staircase = staircase
         self.staircase_hall = staircase_hall
@@ -122,6 +276,14 @@ class CoreTube:
         except Exception:
             self.elevator = elevator_hall
             self.elevator_area = float(elevator_hall.area)
+
+    def translate(self, dx: float = 0.0, dy: float = 0.0) -> None:
+        if abs(float(dx)) <= 1e-9 and abs(float(dy)) <= 1e-9:
+            return
+        self.polygon = affinity.translate(self.polygon, xoff=float(dx), yoff=float(dy))
+        cx, cy = self.center
+        self.center = (float(cx) + float(dx), float(cy) + float(dy))
+        self.build_subzones_from_bounds()
 
     @classmethod
     def create(
@@ -168,30 +330,62 @@ class CoreTube:
         width = min(width, max_width)
         depth = min(depth, max_depth)
 
+        pos = str(position or "north").lower()
+
         cx = (x_min + x_max) / 2
-        if position == "north":
-            cy = y_max - depth / 2  # 紧贴北墙
-        elif position == "south":
-            cy = y_min + depth / 2  # 紧贴南墙
-        elif position == "center":
-            cy = (y_min + y_max) / 2
-        elif position == "entrance":
+        cy = (y_min + y_max) / 2
+        if pos == "north":
+            cy = y_max - depth / 2
+        elif pos == "south":
+            cy = y_min + depth / 2
+        elif pos == "east":
+            cx = x_max - width / 2
+        elif pos == "west":
+            cx = x_min + width / 2
+        elif pos == "center":
+            pass
+        elif pos == "entrance":
             cy = y_min + depth / 2 + 3
         else:
-            cy = y_max - depth / 2  # 默认北墙
+            cy = y_max - depth / 2
 
         cx = round(cx / grid_alignment) * grid_alignment
         cx = min(max(cx, x_min + width / 2), x_max - width / 2)
 
-        if position == "north":
+        if pos in ("north",):
             cy = np.floor(cy / grid_alignment) * grid_alignment
-        elif position == "south":
+        elif pos in ("south",):
             cy = np.ceil(cy / grid_alignment) * grid_alignment
         else:
             cy = round(cy / grid_alignment) * grid_alignment
         cy = min(max(cy, y_min + depth / 2), y_max - depth / 2)
 
         core = cls.create((cx, cy), width, depth)
+        try:
+            _, y0, _, y1 = (float(v) for v in floor_bounds)
+            _, core_miny, _, core_maxy = (float(v) for v in core.polygon.bounds)
+            x0, _, x1, _ = (float(v) for v in floor_bounds)
+            core_minx, _, core_maxx, _ = (float(v) for v in core.polygon.bounds)
+            exterior_thickness = 0.24
+            max_snap = float(grid_alignment) + 0.05
+            if pos == "north":
+                dy = (y1 - exterior_thickness) - core_maxy
+                if (abs(float(dy)) > 1e-6) and (abs(float(dy)) <= max_snap):
+                    core.translate(dy=float(dy))
+            elif pos == "south":
+                dy = (y0 + exterior_thickness) - core_miny
+                if (abs(float(dy)) > 1e-6) and (abs(float(dy)) <= max_snap):
+                    core.translate(dy=float(dy))
+            elif pos == "east":
+                dx = (x1 - exterior_thickness) - core_maxx
+                if (abs(float(dx)) > 1e-6) and (abs(float(dx)) <= max_snap):
+                    core.translate(dx=float(dx))
+            elif pos == "west":
+                dx = (x0 + exterior_thickness) - core_minx
+                if (abs(float(dx)) > 1e-6) and (abs(float(dx)) <= max_snap):
+                    core.translate(dx=float(dx))
+        except Exception:
+            pass
 
         # 边界安全：确保子区域不超出楼层
         floor_poly = box(x_min, y_min, x_max, y_max)
@@ -367,6 +561,7 @@ class RectangularTopologyGenerator:
         core_tube: Optional[CoreTube] = None,
         corridor_layout: str = "door_side",
         entrance_position: Optional[Tuple[float, float]] = None,
+        group_seed: Optional[int] = None,
     ) -> Tuple[CoreTube, List[Corridor], List[Island]]:
         """
         生成矩形拓扑
@@ -384,22 +579,27 @@ class RectangularTopologyGenerator:
             core_tube = CoreTube.create_for_floor(self.bounds, grid_alignment=self.grid_alignment)
 
         # Step 2: 生成走廊
-        if corridor_layout == "door_side":
-            corridors = self._generate_cross_corridors(core_tube)
-        elif corridor_layout == "cross":
-            corridors = self._generate_cross_corridors(core_tube)
+        if corridor_layout in ("door_side", "cross"):
+            corridors = self._generate_plug_corridors(core_tube, group_seed=group_seed)
         elif corridor_layout == "H":
             corridors = self._generate_h_corridors(core_tube)
         elif corridor_layout == "grid":
             corridors = self._generate_grid_corridors(core_tube)
+        elif corridor_layout == "organic":
+            corridors = self._generate_organic_corridors(core_tube, group_seed=group_seed)
         else:
-            corridors = self._generate_cross_corridors(core_tube)
+            corridors = self._generate_plug_corridors(core_tube, group_seed=group_seed)
 
-        # Step 2.5: 核心筒对齐走廊交叉区，确保减去后产生纯矩形岛屿
-        core_tube = self._align_core_to_corridors(core_tube, corridors)
+        # Step 2.5: 核心筒对齐走廊交叉区（保持 core_placement 稳定性：不再平移核心筒）
+        core_tube = core_tube
 
-        # Step 2.6: 走廊裁剪核心筒（避免几何重叠；安全提取多边形碎片）
-        core_poly_for_cut = core_tube.polygon.buffer(1e-4, join_style="mitre")
+        # Step 2.6: 走廊裁剪核心筒（避免几何重叠；保持 corridor 与 hall 的“贴边”不被 buffer 缝隙吞没）
+        core_poly_for_cut = core_tube.polygon
+        try:
+            if (not core_poly_for_cut.is_valid) and make_valid is not None:
+                core_poly_for_cut = make_valid(core_poly_for_cut)
+        except Exception:
+            pass
         cut_corridors: List[Corridor] = []
         for corridor in corridors:
             try:
@@ -634,6 +834,140 @@ class RectangularTopologyGenerator:
 
         return [h_corridor]
 
+    def _generate_plug_corridors(self, core: CoreTube, *, group_seed: Optional[int]) -> List[Corridor]:
+        cw = float(self.corridor_width)
+        eps = 0.05
+        door_min = 0.9 + 2.0 * 0.12 + eps
+
+        opening_sides = [str(s).lower() for s in (getattr(core, "opening_sides", None) or ["south"])]
+        if not opening_sides:
+            opening_sides = ["south"]
+
+        hall_a = getattr(core, "elevator_hall", None)
+        hall_b = getattr(core, "elevator_hall_b", None)
+
+        def _clamp(v: float, lo: float, hi: float) -> float:
+            return float(min(max(float(v), float(lo)), float(hi)))
+
+        def _align(v: float) -> float:
+            return round(float(v) / float(self.grid_alignment)) * float(self.grid_alignment)
+
+        def _shared_len_for_bounds(side: str, cpoly: Polygon, hpoly: Polygon) -> float:
+            if cpoly is None or hpoly is None or cpoly.is_empty or hpoly.is_empty:
+                return 0.0
+            cminx, cminy, cmaxx, cmaxy = (float(v) for v in cpoly.bounds)
+            hminx, hminy, hmaxx, hmaxy = (float(v) for v in hpoly.bounds)
+            tol = 0.06
+            if side == "west" and abs(cmaxx - hminx) <= tol:
+                return max(0.0, min(cmaxy, hmaxy) - max(cminy, hminy))
+            if side == "east" and abs(cminx - hmaxx) <= tol:
+                return max(0.0, min(cmaxy, hmaxy) - max(cminy, hminy))
+            if side == "south" and abs(cmaxy - hminy) <= tol:
+                return max(0.0, min(cmaxx, hmaxx) - max(cminx, hminx))
+            if side == "north" and abs(cminy - hmaxy) <= tol:
+                return max(0.0, min(cmaxx, hmaxx) - max(cminx, hminx))
+            return 0.0
+
+        def _best_anchor_for_side(side: str, hpoly: Polygon) -> Optional[Tuple[float, float]]:
+            if hpoly is None or hpoly.is_empty:
+                return None
+            hminx, hminy, hmaxx, hmaxy = (float(v) for v in hpoly.bounds)
+            margin = max(0.2, cw / 2.0 + 0.1)
+            if side in ("north", "south"):
+                xs = [(hminx + hmaxx) / 2.0, hminx + margin, hmaxx - margin]
+                best = None
+                best_len = -1.0
+                for x0 in xs:
+                    x = _align(_clamp(x0, float(self.x_min) + cw / 2.0, float(self.x_max) - cw / 2.0))
+                    if side == "south":
+                        y0 = float(hminy)
+                        y1 = float(self.y_min) + cw / 2.0
+                    else:
+                        y0 = float(hmaxy)
+                        y1 = float(self.y_max) - cw / 2.0
+                    y0 = _clamp(y0, float(self.y_min) + cw / 2.0, float(self.y_max) - cw / 2.0)
+                    y1 = _clamp(y1, float(self.y_min) + cw / 2.0, float(self.y_max) - cw / 2.0)
+                    c = Corridor(id="tmp", centerline=LineString([(x, y0), (x, y1)]), width=cw, orientation="vertical")
+                    L = _shared_len_for_bounds(side, c.polygon, hpoly)
+                    if L > best_len + 1e-6:
+                        best_len = L
+                        best = (x, L)
+                return best
+            ys = [(hminy + hmaxy) / 2.0, hminy + margin, hmaxy - margin]
+            best = None
+            best_len = -1.0
+            for y0 in ys:
+                y = _align(_clamp(y0, float(self.y_min) + cw / 2.0, float(self.y_max) - cw / 2.0))
+                if side == "west":
+                    x0 = float(hminx)
+                    x1 = float(self.x_min) + cw / 2.0
+                else:
+                    x0 = float(hmaxx)
+                    x1 = float(self.x_max) - cw / 2.0
+                x0 = _clamp(x0, float(self.x_min) + cw / 2.0, float(self.x_max) - cw / 2.0)
+                x1 = _clamp(x1, float(self.x_min) + cw / 2.0, float(self.x_max) - cw / 2.0)
+                c = Corridor(id="tmp", centerline=LineString([(x0, y), (x1, y)]), width=cw, orientation="horizontal")
+                L = _shared_len_for_bounds(side, c.polygon, hpoly)
+                if L > best_len + 1e-6:
+                    best_len = L
+                    best = (y, L)
+            return best
+
+        def _build_corridor_for_side(side: str, hpoly: Polygon, cid: str) -> Optional[Corridor]:
+            pick = _best_anchor_for_side(side, hpoly)
+            if pick is None:
+                return None
+            val, L = pick
+            if float(L) + 1e-6 < float(door_min):
+                return None
+            hminx, hminy, hmaxx, hmaxy = (float(v) for v in hpoly.bounds)
+            if side in ("north", "south"):
+                x = float(val)
+                if side == "south":
+                    y0, y1 = float(hminy), float(self.y_min) + cw / 2.0
+                else:
+                    y0, y1 = float(hmaxy), float(self.y_max) - cw / 2.0
+                y0 = _clamp(y0, float(self.y_min) + cw / 2.0, float(self.y_max) - cw / 2.0)
+                y1 = _clamp(y1, float(self.y_min) + cw / 2.0, float(self.y_max) - cw / 2.0)
+                return Corridor(id=cid, centerline=LineString([(x, y0), (x, y1)]), width=cw, orientation="vertical")
+            y = float(val)
+            if side == "west":
+                x0, x1 = float(hminx), float(self.x_min) + cw / 2.0
+            else:
+                x0, x1 = float(hmaxx), float(self.x_max) - cw / 2.0
+            x0 = _clamp(x0, float(self.x_min) + cw / 2.0, float(self.x_max) - cw / 2.0)
+            x1 = _clamp(x1, float(self.x_min) + cw / 2.0, float(self.x_max) - cw / 2.0)
+            return Corridor(id=cid, centerline=LineString([(x0, y), (x1, y)]), width=cw, orientation="horizontal")
+
+        corridors: List[Corridor] = []
+        for side in opening_sides:
+            if side in ("west", "east") and hall_b is not None and set(opening_sides) == {"west", "east"}:
+                hpoly = hall_a if side == "west" else hall_b
+            elif side in ("south", "north") and hall_b is not None and set(opening_sides) == {"south", "north"}:
+                hpoly = hall_a if side == "south" else hall_b
+            else:
+                hpoly = hall_a
+            if hpoly is None or hpoly.is_empty:
+                continue
+            c = _build_corridor_for_side(side, hpoly, cid=f"corridor_main_{side}")
+            if c is not None:
+                corridors.append(c)
+
+        if corridors:
+            return corridors
+
+        try:
+            corridors = self._generate_organic_corridors(core, group_seed=group_seed)
+            if corridors:
+                return corridors
+        except Exception:
+            pass
+
+        try:
+            return list(self._generate_cross_corridors(core))
+        except Exception:
+            return []
+
     def _generate_h_corridors(self, core: CoreTube) -> List[Corridor]:
         """H 型走廊布局（适合长条形楼层）"""
         cx, cy = core.center
@@ -714,6 +1048,233 @@ class RectangularTopologyGenerator:
                 width=self.corridor_width,
                 orientation="horizontal",
             ))
+
+        return corridors
+
+    def _infer_core_placement(self, core: CoreTube) -> str:
+        try:
+            cminx, cminy, cmaxx, cmaxy = (float(v) for v in core.polygon.bounds)
+        except Exception:
+            return "center"
+        tol = 0.6
+        if abs(float(cmaxy) - float(self.y_max)) <= tol:
+            return "north"
+        if abs(float(cminy) - float(self.y_min)) <= tol:
+            return "south"
+        if abs(float(cmaxx) - float(self.x_max)) <= tol:
+            return "east"
+        if abs(float(cminx) - float(self.x_min)) <= tol:
+            return "west"
+        return "center"
+
+    def _sample_truncation(self, group_seed: Optional[int]) -> float:
+        if group_seed is None:
+            return 5.0
+        rng = np.random.default_rng(int(group_seed))
+        return float([3.0, 5.0, 8.0][int(rng.integers(0, 3))])
+
+    def _generate_organic_corridors(self, core: CoreTube, *, group_seed: Optional[int]) -> List[Corridor]:
+        t = self._sample_truncation(group_seed)
+        cw = float(self.corridor_width)
+        eps = 0.05
+        door_min = 0.9 + 2.0 * 0.12 + eps
+
+        opening_sides = [str(s).lower() for s in (getattr(core, "opening_sides", None) or ["south"])]
+        if not opening_sides:
+            opening_sides = ["south"]
+
+        corridors: List[Corridor] = []
+
+        hall_a = getattr(core, "elevator_hall", None)
+        hall_b = getattr(core, "elevator_hall_b", None)
+
+        def _clamp(v: float, lo: float, hi: float) -> float:
+            return float(min(max(float(v), float(lo)), float(hi)))
+
+        def _align(v: float) -> float:
+            return round(float(v) / float(self.grid_alignment)) * float(self.grid_alignment)
+
+        def _shared_len_for_bounds(side: str, cpoly: Polygon, hpoly: Polygon) -> float:
+            if cpoly is None or hpoly is None or cpoly.is_empty or hpoly.is_empty:
+                return 0.0
+            cminx, cminy, cmaxx, cmaxy = (float(v) for v in cpoly.bounds)
+            hminx, hminy, hmaxx, hmaxy = (float(v) for v in hpoly.bounds)
+            tol = 0.06
+            if side == "west" and abs(cmaxx - hminx) <= tol:
+                return max(0.0, min(cmaxy, hmaxy) - max(cminy, hminy))
+            if side == "east" and abs(cminx - hmaxx) <= tol:
+                return max(0.0, min(cmaxy, hmaxy) - max(cminy, hminy))
+            if side == "south" and abs(cmaxy - hminy) <= tol:
+                return max(0.0, min(cmaxx, hmaxx) - max(cminx, hminx))
+            if side == "north" and abs(cminy - hmaxy) <= tol:
+                return max(0.0, min(cmaxx, hmaxx) - max(cminx, hminx))
+            return 0.0
+
+        def _best_anchor_for_side(side: str, hpoly: Polygon) -> Optional[Tuple[float, float]]:
+            if hpoly is None or hpoly.is_empty:
+                return None
+            hminx, hminy, hmaxx, hmaxy = (float(v) for v in hpoly.bounds)
+            margin = max(0.2, cw / 2.0 + 0.1)
+            if side in ("north", "south"):
+                xs = [
+                    (hminx + hmaxx) / 2.0,
+                    hminx + margin,
+                    hmaxx - margin,
+                ]
+                best = None
+                best_len = -1.0
+                for x0 in xs:
+                    x = _align(_clamp(x0, float(self.x_min) + cw / 2.0, float(self.x_max) - cw / 2.0))
+                    if side == "south":
+                        y0 = float(hminy)
+                        y1 = float(self.y_min) + float(t) + cw / 2.0
+                        y0 = _clamp(y0, float(self.y_min) + cw / 2.0, float(self.y_max) - cw / 2.0)
+                        y1 = _clamp(y1, float(self.y_min) + cw / 2.0, float(self.y_max) - cw / 2.0)
+                        c = Corridor(id="tmp", centerline=LineString([(x, y0), (x, y1)]), width=cw, orientation="vertical")
+                    else:
+                        y0 = float(hmaxy)
+                        y1 = float(self.y_max) - float(t) - cw / 2.0
+                        y0 = _clamp(y0, float(self.y_min) + cw / 2.0, float(self.y_max) - cw / 2.0)
+                        y1 = _clamp(y1, float(self.y_min) + cw / 2.0, float(self.y_max) - cw / 2.0)
+                        c = Corridor(id="tmp", centerline=LineString([(x, y0), (x, y1)]), width=cw, orientation="vertical")
+                    L = _shared_len_for_bounds(side, c.polygon, hpoly)
+                    if L > best_len + 1e-6:
+                        best_len = L
+                        best = (x, L)
+                if best is None:
+                    return None
+                return (best[0], best[1])
+            else:
+                ys = [
+                    (hminy + hmaxy) / 2.0,
+                    hminy + margin,
+                    hmaxy - margin,
+                ]
+                best = None
+                best_len = -1.0
+                for y0 in ys:
+                    y = _align(_clamp(y0, float(self.y_min) + cw / 2.0, float(self.y_max) - cw / 2.0))
+                    if side == "west":
+                        x0 = float(hminx)
+                        x1 = float(self.x_min) + float(t) + cw / 2.0
+                        x0 = _clamp(x0, float(self.x_min) + cw / 2.0, float(self.x_max) - cw / 2.0)
+                        x1 = _clamp(x1, float(self.x_min) + cw / 2.0, float(self.x_max) - cw / 2.0)
+                        c = Corridor(id="tmp", centerline=LineString([(x0, y), (x1, y)]), width=cw, orientation="horizontal")
+                    else:
+                        x0 = float(hmaxx)
+                        x1 = float(self.x_max) - float(t) - cw / 2.0
+                        x0 = _clamp(x0, float(self.x_min) + cw / 2.0, float(self.x_max) - cw / 2.0)
+                        x1 = _clamp(x1, float(self.x_min) + cw / 2.0, float(self.x_max) - cw / 2.0)
+                        c = Corridor(id="tmp", centerline=LineString([(x0, y), (x1, y)]), width=cw, orientation="horizontal")
+                    L = _shared_len_for_bounds(side, c.polygon, hpoly)
+                    if L > best_len + 1e-6:
+                        best_len = L
+                        best = (y, L)
+                if best is None:
+                    return None
+                return (best[0], best[1])
+
+        def _build_corridor_for_side(side: str, hpoly: Polygon, cid: str) -> Optional[Corridor]:
+            pick = _best_anchor_for_side(side, hpoly)
+            if pick is None:
+                return None
+            val, L = pick
+            if float(L) + 1e-6 < float(door_min):
+                return None
+            hminx, hminy, hmaxx, hmaxy = (float(v) for v in hpoly.bounds)
+            if side in ("north", "south"):
+                x = float(val)
+                if side == "south":
+                    y0 = float(hminy)
+                    y1 = float(self.y_min) + float(t) + cw / 2.0
+                else:
+                    y0 = float(hmaxy)
+                    y1 = float(self.y_max) - float(t) - cw / 2.0
+                y0 = _clamp(y0, float(self.y_min) + cw / 2.0, float(self.y_max) - cw / 2.0)
+                y1 = _clamp(y1, float(self.y_min) + cw / 2.0, float(self.y_max) - cw / 2.0)
+                return Corridor(id=cid, centerline=LineString([(x, y0), (x, y1)]), width=cw, orientation="vertical")
+            y = float(val)
+            if side == "west":
+                x0 = float(hminx)
+                x1 = float(self.x_min) + float(t) + cw / 2.0
+            else:
+                x0 = float(hmaxx)
+                x1 = float(self.x_max) - float(t) - cw / 2.0
+            x0 = _clamp(x0, float(self.x_min) + cw / 2.0, float(self.x_max) - cw / 2.0)
+            x1 = _clamp(x1, float(self.x_min) + cw / 2.0, float(self.x_max) - cw / 2.0)
+            return Corridor(id=cid, centerline=LineString([(x0, y), (x1, y)]), width=cw, orientation="horizontal")
+
+        for side in opening_sides:
+            if side in ("west", "east") and hall_b is not None and core.elevator_hall_b is not None and set(opening_sides) == {"west", "east"}:
+                hpoly = hall_a if side == "west" else hall_b
+            elif side in ("south", "north") and hall_b is not None and core.elevator_hall_b is not None and set(opening_sides) == {"south", "north"}:
+                hpoly = hall_a if side == "south" else hall_b
+            else:
+                hpoly = hall_a
+            if hpoly is None or hpoly.is_empty:
+                continue
+            c = _build_corridor_for_side(side, hpoly, cid=f"corridor_main_{side}")
+            if c is not None:
+                corridors.append(c)
+
+        if not corridors:
+            placement = self._infer_core_placement(core)
+            hall = hall_a if (hall_a is not None and (not getattr(hall_a, "is_empty", True))) else core.polygon
+            hminx, hminy, hmaxx, hmaxy = (float(v) for v in hall.bounds)
+            if placement in ("north", "south", "center"):
+                x = _align((hminx + hmaxx) / 2.0)
+                x = _clamp(x, float(self.x_min) + cw / 2.0, float(self.x_max) - cw / 2.0)
+                if placement == "north":
+                    y0, y1 = float(hminy), float(self.y_min) + float(t) + cw / 2.0
+                elif placement == "south":
+                    y0, y1 = float(hmaxy), float(self.y_max) - float(t) - cw / 2.0
+                else:
+                    y0, y1 = float(self.y_min) + float(t) + cw / 2.0, float(self.y_max) - float(t) - cw / 2.0
+                y0 = _clamp(y0, float(self.y_min) + cw / 2.0, float(self.y_max) - cw / 2.0)
+                y1 = _clamp(y1, float(self.y_min) + cw / 2.0, float(self.y_max) - cw / 2.0)
+                corridors.append(Corridor(id="corridor_v_main", centerline=LineString([(x, y0), (x, y1)]), width=cw, orientation="vertical"))
+            else:
+                y = _align((hminy + hmaxy) / 2.0)
+                y = _clamp(y, float(self.y_min) + cw / 2.0, float(self.y_max) - cw / 2.0)
+                if placement == "east":
+                    x0, x1 = float(hminx), float(self.x_min) + float(t) + cw / 2.0
+                else:
+                    x0, x1 = float(hmaxx), float(self.x_max) - float(t) - cw / 2.0
+                x0 = _clamp(x0, float(self.x_min) + cw / 2.0, float(self.x_max) - cw / 2.0)
+                x1 = _clamp(x1, float(self.x_min) + cw / 2.0, float(self.x_max) - cw / 2.0)
+                corridors.append(Corridor(id="corridor_h_main", centerline=LineString([(x0, y), (x1, y)]), width=cw, orientation="horizontal"))
+
+        if group_seed is not None and corridors:
+            rng = np.random.default_rng(int(group_seed) + 17)
+            use_t = bool(int(rng.integers(0, 2)))
+        else:
+            use_t = False
+
+        if use_t and corridors:
+            main = corridors[0]
+            minx, miny, maxx, maxy = (float(v) for v in main.polygon.bounds)
+            if main.orientation == "vertical":
+                yb = round(((miny + maxy) / 2.0) / float(self.grid_alignment)) * float(self.grid_alignment)
+                left = float(self.x_min) + float(t) + cw / 2.0
+                right = float(self.x_max) - float(t) - cw / 2.0
+                if right - left >= 4.0:
+                    corridors.append(Corridor(
+                        id="corridor_h_branch",
+                        centerline=LineString([(left, yb), (right, yb)]),
+                        width=cw,
+                        orientation="horizontal",
+                    ))
+            elif main.orientation == "horizontal":
+                xb = round(((minx + maxx) / 2.0) / float(self.grid_alignment)) * float(self.grid_alignment)
+                bot = float(self.y_min) + float(t) + cw / 2.0
+                top = float(self.y_max) - float(t) - cw / 2.0
+                if top - bot >= 4.0:
+                    corridors.append(Corridor(
+                        id="corridor_v_branch",
+                        centerline=LineString([(xb, bot), (xb, top)]),
+                        width=cw,
+                        orientation="vertical",
+                    ))
 
         return corridors
 
@@ -1080,6 +1641,7 @@ def generate_rectangular_topology(
     entrance_position: Optional[Tuple[float, float]] = None,
     core_tube_override: Optional[CoreTube] = None,
     core_position: str = "north",
+    group_seed: Optional[int] = None,
 ) -> Tuple[CoreTube, List[Corridor], List[Island]]:
     """
     便捷函数：生成矩形拓扑
@@ -1091,7 +1653,8 @@ def generate_rectangular_topology(
         corridor_layout: 走廊布局类型 ('door_side' | 'cross' | 'H' | 'grid')
         entrance_position: 入口位置
         core_tube_override: 复用已有核心筒（跨层共享时使用）
-        core_position: 核心筒位置 ('north' | 'south' | 'center')
+        core_position: 核心筒位置 ('north' | 'south' | 'center' | 'east' | 'west')
+        group_seed: organic 模式用的分组种子（用于端头退让/骨架分支选择）
 
     返回:
         (核心筒, 走廊列表, 岛屿列表)
@@ -1101,17 +1664,66 @@ def generate_rectangular_topology(
         corridor_width=corridor_width,
     )
 
+    minx, miny, maxx, maxy = (float(v) for v in floor_boundary.bounds)
+    w = maxx - minx
+    h = maxy - miny
+    floor_area = float(floor_boundary.area)
+
     if core_tube_override is not None:
         core = core_tube_override
+        try:
+            cminx, cminy, cmaxx, cmaxy = (float(v) for v in core.polygon.bounds)
+            tol = 0.6
+            if abs(cmaxy - float(maxy)) <= tol:
+                pos = "north"
+            elif abs(cminy - float(miny)) <= tol:
+                pos = "south"
+            elif abs(cmaxx - float(maxx)) <= tol:
+                pos = "east"
+            elif abs(cminx - float(minx)) <= tol:
+                pos = "west"
+            else:
+                pos = "center"
+        except Exception:
+            pos = str(core_position or "north").lower()
     else:
         core = CoreTube.create_for_floor(
             floor_boundary.bounds,
             area_ratio=core_area_ratio,
             position=core_position,
         )
+        pos = str(core_position or "north").lower()
+    if entrance_position is None:
+        entrance = ((minx + maxx) / 2.0, float(miny))
+    else:
+        entrance = entrance_position
+
+    opening_sides: List[str] = []
+    if pos in ("north", "south", "east", "west"):
+        opening_sides = [{"north": "south", "south": "north", "east": "west", "west": "east"}[pos]]
+    else:
+        main_axis = "horizontal" if float(w) >= float(h) else "vertical"
+        cx, cy = (float(v) for v in core.center)
+        ex, ey = (float(v) for v in entrance)
+        if main_axis == "horizontal":
+            primary = "east" if ex > cx else "west"
+            opening_sides = [primary]
+            if str(corridor_layout or "").lower() == "organic" and floor_area >= 500.0:
+                opening_sides = ["west", "east"]
+        else:
+            primary = "north" if ey > cy else "south"
+            opening_sides = [primary]
+            if str(corridor_layout or "").lower() == "organic" and floor_area >= 500.0:
+                opening_sides = ["south", "north"]
+
+    try:
+        core.set_opening_sides(opening_sides)
+    except Exception:
+        pass
 
     return generator.generate(
         core_tube=core,
         corridor_layout=corridor_layout,
         entrance_position=entrance_position,
+        group_seed=group_seed,
     )
