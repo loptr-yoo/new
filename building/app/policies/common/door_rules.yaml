@@ -1,0 +1,7 @@
+{
+  "policy_schema_version": "policy.v1",
+  "door_rules": {
+    "default_width": 0.9
+  }
+}
+

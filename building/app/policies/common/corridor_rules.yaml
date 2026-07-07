@@ -1,0 +1,11 @@
+{
+  "policy_schema_version": "policy.v1",
+  "corridor_rules": {
+    "layout": "organic",
+    "reserve_ratio": 0.16,
+    "wall_reserve_ratio": 0.04,
+    "min_width": 1.2,
+    "target_width": 2.0
+  }
+}
+

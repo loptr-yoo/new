@@ -1,0 +1,13 @@
+{
+  "policy_schema_version": "policy.v1",
+  "vertical_core_rules": {
+    "area_ratio": 0.12,
+    "low_floor_connectivity": "stair",
+    "high_floor_connectivity": "stair_and_elevator",
+    "elevator_floor_threshold": 4,
+    "placement_default": "auto",
+    "candidate_positions": ["east", "north", "south", "west"],
+    "strict_core_placement": false
+  }
+}
+

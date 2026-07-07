@@ -220,3 +220,17 @@ backend/tests/test_exterior_door_generation.py
 backend/tests/test_topology_edge_walls.py
 docs/building_mode.md
 
+
+# Backend-only building outputs
+building/out/*
+!building/out/.gitkeep
+
+# Legacy backend output roots
+building/outputs/*
+!building/outputs/.gitkeep
+/out/
+logs/
+artifacts/
+*.log
+_legacy/**
+!_legacy/README.md

@@ -1,15 +1,17 @@
 {
-  "include": ["backend"],
+  "include": ["building"],
   "exclude": [
+    "_legacy",
+    "building/out",
+    "building/outputs",
+    "out",
+    "logs",
+    "artifacts",
     "**/__pycache__",
-    "**/.pytest_cache",
-    "**/.mypy_cache",
-    "**/.ruff_cache",
-    "frontend/node_modules",
-    "frontend/dist", "**/node_modules", "**/.*"
+    ".pytest_cache",
+    ".venv",
+    "venv"
   ],
-  "venvPath": "./backend",
-  "venv": ".venv",
   "typeCheckingMode": "basic",
   "pythonVersion": "3.10",
   "reportMissingImports": true,

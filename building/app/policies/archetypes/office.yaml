@@ -1,0 +1,14 @@
+{
+  "policy_schema_version": "policy.v1",
+  "archetype": "office",
+  "room_mix": {
+    "default_floor_role": "office"
+  },
+  "corridor_rules": {
+    "reserve_ratio": 0.18
+  },
+  "vertical_core_rules": {
+    "area_ratio": 0.13
+  }
+}
+

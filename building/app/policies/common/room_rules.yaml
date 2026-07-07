@@ -1,0 +1,28 @@
+{
+  "policy_schema_version": "policy.v1",
+  "room_rules": {
+    "living_room": {"min_area": 12.0, "target_area": 24.0, "max_area": 42.0, "zone": "public", "needs_window": true, "optional": false},
+    "dining_room": {"min_area": 8.0, "target_area": 14.0, "max_area": 26.0, "zone": "public", "needs_window": false, "optional": true},
+    "kitchen": {"min_area": 6.0, "target_area": 12.0, "max_area": 22.0, "zone": "service", "needs_window": true, "optional": false},
+    "bedroom": {"min_area": 9.0, "target_area": 14.0, "max_area": 24.0, "zone": "private", "needs_window": true, "optional": false},
+    "master_bedroom": {"min_area": 12.0, "target_area": 20.0, "max_area": 32.0, "zone": "private", "needs_window": true, "optional": false},
+    "bathroom": {"min_area": 4.0, "target_area": 7.0, "max_area": 12.0, "zone": "service", "needs_window": false, "optional": false},
+    "toilet": {"min_area": 3.0, "target_area": 4.5, "max_area": 8.0, "zone": "service", "needs_window": false, "optional": true},
+    "study": {"min_area": 6.0, "target_area": 10.0, "max_area": 18.0, "zone": "private", "needs_window": true, "optional": true},
+    "storage": {"min_area": 3.0, "target_area": 5.0, "max_area": 10.0, "zone": "service", "needs_window": false, "optional": true},
+    "utility": {"min_area": 4.0, "target_area": 6.0, "max_area": 12.0, "zone": "service", "needs_window": false, "optional": true},
+    "office": {"min_area": 8.0, "target_area": 14.0, "max_area": 28.0, "zone": "private", "needs_window": true, "optional": false},
+    "meeting_room": {"min_area": 10.0, "target_area": 18.0, "max_area": 40.0, "zone": "private", "needs_window": true, "optional": false},
+    "lobby": {"min_area": 12.0, "target_area": 24.0, "max_area": 60.0, "zone": "public", "needs_window": false, "optional": false},
+    "reception": {"min_area": 8.0, "target_area": 14.0, "max_area": 32.0, "zone": "public", "needs_window": false, "optional": true},
+    "pantry": {"min_area": 4.0, "target_area": 7.0, "max_area": 14.0, "zone": "service", "needs_window": false, "optional": true},
+    "phone_booth": {"min_area": 2.0, "target_area": 3.0, "max_area": 5.0, "zone": "service", "needs_window": false, "optional": true},
+    "waiting_area": {"min_area": 8.0, "target_area": 16.0, "max_area": 36.0, "zone": "public", "needs_window": false, "optional": true},
+    "lounge": {"min_area": 10.0, "target_area": 18.0, "max_area": 40.0, "zone": "public", "needs_window": false, "optional": true},
+    "classroom": {"min_area": 20.0, "target_area": 36.0, "max_area": 70.0, "zone": "private", "needs_window": true, "optional": false},
+    "reading_room": {"min_area": 16.0, "target_area": 30.0, "max_area": 60.0, "zone": "private", "needs_window": true, "optional": true},
+    "activity_room": {"min_area": 16.0, "target_area": 30.0, "max_area": 60.0, "zone": "public", "needs_window": true, "optional": true},
+    "playroom": {"min_area": 12.0, "target_area": 24.0, "max_area": 50.0, "zone": "public", "needs_window": true, "optional": true}
+  }
+}
+

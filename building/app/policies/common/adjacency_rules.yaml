@@ -1,0 +1,18 @@
+{
+  "policy_schema_version": "policy.v1",
+  "adjacency_rules": {
+    "forbidden": {
+      "kitchen": ["bedroom", "study"],
+      "bathroom": ["kitchen", "dining_room"],
+      "toilet": ["kitchen", "dining_room"],
+      "utility": ["living_room", "bedroom"]
+    },
+    "preferred": {
+      "kitchen": ["dining_room", "living_room"],
+      "living_room": ["dining_room", "kitchen"],
+      "master_bedroom": ["bathroom"],
+      "lobby": ["reception", "waiting_area"]
+    }
+  }
+}
+

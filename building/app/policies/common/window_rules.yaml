@@ -1,0 +1,7 @@
+{
+  "policy_schema_version": "policy.v1",
+  "window_rules": {
+    "required_room_types": ["living_room", "kitchen", "bedroom", "master_bedroom", "study", "office", "meeting_room", "classroom", "reading_room", "activity_room", "playroom"]
+  }
+}
+
