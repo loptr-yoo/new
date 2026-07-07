@@ -1,0 +1,7 @@
+﻿{
+  "prompt": "生成一个二层住宅区 一楼包含四个卧室、厨房、客厅、两个卫生间 二楼包含四个卧室和一个卫生间",
+  "total_floors": 2,
+  "topology_mode": "grid_growth",
+  "corridor_layout": "organic",
+  "core_placement": "east"
+}

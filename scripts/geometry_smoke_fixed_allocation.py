@@ -2,7 +2,7 @@
 
 import sys
 
-MESSAGE = "This CLI moved to: python -m building.cli.full_pipeline"
+MESSAGE = "This CLI moved to: python -m building.cli.geometry_smoke_fixed_allocation"
 
 
 def main() -> int:

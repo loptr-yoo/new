@@ -1,0 +1,2433 @@
+"""
+island_partition_solver.py
+
+岛屿房间划分求解器：Treemap Warm Start + 连续坐标 MIQP
+
+算法流程：
+1. Squarified Treemap 生成初始布局（< 1ms）
+2. CP-SAT 整数规划优化（1-5s）
+3. 边界裁剪（适配非矩形岛屿）
+
+正交性保证：房间定义为 (x, y, w, d) 矩形，天然正交。
+回退机制：MIQP 失败时退化为 Treemap-only。
+"""
+from __future__ import annotations
+
+import logging
+import time
+from dataclasses import dataclass, field
+from typing import Any, List, Optional, Tuple
+
+import numpy as np
+from typing import Dict
+
+from shapely.geometry import GeometryCollection, Polygon, box
+from shapely.geometry.base import BaseGeometry
+from shapely.ops import unary_union
+
+from .treemap import flat_squarify as _squarify_impl
+from .treemap import (
+    _worst_ratio,
+    _layout_row,
+    _do_layout_row,
+    _do_layout_row_v,
+    hierarchical_treemap,
+)
+from .room_spec import (
+    IslandContext,
+    RoomSpec as SemanticRoomSpec,
+    SolverConfig,
+    WarmStartRect,
+    ZoneType,
+)
+from .core_contracts import CORE_OVERLAP_EPSILON_AREA, CoreFootprintContract
+from .exceptions import LayoutGeometryInvariantError
+
+logger = logging.getLogger(__name__)
+
+STAGE2A2_COVERAGE_DEBT_FALLBACK_ENABLED = True
+TREEMAP_REPACK_STEP = 0.50
+TREEMAP_MAX_CANDIDATES_PER_ROOM = 200
+
+
+class SemanticSolveError(RuntimeError):
+    """语义求解错误，携带 CP-SAT 状态信息。"""
+
+    def __init__(self, message: str, status_code: Optional[int] = None, status_name: str = "UNKNOWN"):
+        super().__init__(message)
+        self.status_code = status_code
+        self.status_name = status_name
+
+    @property
+    def is_infeasible(self) -> bool:
+        return self.status_name.upper() == "INFEASIBLE"
+
+
+# ============================================================
+# 数据类型
+# ============================================================
+
+
+@dataclass
+class RoomSpec:
+    """房间规格输入"""
+
+    room_id: str
+    room_type: str
+    target_area: float  # m²
+    area_tolerance: float = 0.1  # ±10%
+    min_width: float = 2.0  # m
+    min_depth: float = 2.0  # m
+    adjacency_required: List[str] = field(default_factory=list)
+    adjacency_forbidden: List[str] = field(default_factory=list)
+    window_access: bool = False
+
+
+@dataclass
+class RoomResult:
+    """房间划分结果"""
+
+    room_id: str
+    x: float  # 左下角 x
+    y: float  # 左下角 y
+    width: float
+    depth: float
+
+    @property
+    def actual_area(self) -> float:
+        return self.width * self.depth
+
+    @property
+    def polygon(self) -> Polygon:
+        return box(self.x, self.y, self.x + self.width, self.y + self.depth)
+
+    @property
+    def bounds(self) -> Tuple[float, float, float, float]:
+        return (self.x, self.y, self.x + self.width, self.y + self.depth)
+
+    @property
+    def center(self) -> Tuple[float, float]:
+        return (self.x + self.width / 2, self.y + self.depth / 2)
+
+
+# ============================================================
+# 主求解器
+# ============================================================
+
+
+class IslandPartitionSolver:
+    """
+    岛屿房间划分求解器
+
+    用法：
+        solver = IslandPartitionSolver(island_polygon, room_specs)
+        results = solver.solve()
+    """
+
+    def __init__(
+        self,
+        island_polygon: Polygon,
+        rooms: List[RoomSpec],
+        solver: str = "cpsat",
+        time_limit: float = 10.0,
+        use_warm_start: bool = True,
+    ):
+        self.island = island_polygon
+        self.rooms = rooms
+        self.solver_type = solver
+        self.time_limit = time_limit
+        self.use_warm_start = use_warm_start
+
+        # 岛屿 AABB
+        self.x_min, self.y_min, self.x_max, self.y_max = island_polygon.bounds
+        self.W = self.x_max - self.x_min
+        self.D = self.y_max - self.y_min
+
+        self.n = len(rooms)
+        self.room_index = {r.room_id: i for i, r in enumerate(rooms)}
+
+        # 预检查
+        total_required = sum(r.target_area * (1 - r.area_tolerance) for r in rooms)
+        if total_required > island_polygon.area * 1.5:
+            raise ValueError(
+                f"Island too small: area={island_polygon.area:.1f}m², "
+                f"rooms require at least {total_required:.1f}m²"
+            )
+
+        # 修正不合理的 min_width/min_depth
+        for r in self.rooms:
+            if r.min_width > self.W * 0.9:
+                logger.warning(
+                    "Room %s min_width=%.1f exceeds island width=%.1f, clamping",
+                    r.room_id, r.min_width, self.W,
+                )
+                r.min_width = self.W * 0.9
+            if r.min_depth > self.D * 0.9:
+                logger.warning(
+                    "Room %s min_depth=%.1f exceeds island depth=%.1f, clamping",
+                    r.room_id, r.min_depth, self.D,
+                )
+                r.min_depth = self.D * 0.9
+
+    # ----------------------------------------------------------
+    # 主入口
+    # ----------------------------------------------------------
+
+    def solve(self) -> List[RoomResult]:
+        """执行三阶段求解，MIQP 失败时回退 Treemap-only"""
+        # Stage 1: Treemap warm start
+        t0 = time.perf_counter()
+        warm_start = self._generate_treemap_warmstart()
+        logger.info(
+            "Treemap warm start: %.1fms, %d rooms",
+            (time.perf_counter() - t0) * 1000,
+            len(warm_start),
+        )
+
+        # 快捷路径：≤2 个房间直接用 treemap，跳过 MIQP
+        if len(self.rooms) <= 2:
+            logger.info("≤2 rooms, using treemap-only (skip MIQP)")
+            results = warm_start
+            results = self._clip_to_boundary(results)
+            return results
+
+        # Stage 2: MIQP 优化（带回退）
+        try:
+            t1 = time.perf_counter()
+            if self.solver_type == "gurobi":
+                results = self._solve_gurobi(warm_start)
+            else:
+                results = self._solve_cpsat(warm_start)
+            logger.info(
+                "MIQP solve: %.1fms", (time.perf_counter() - t1) * 1000
+            )
+        except Exception as e:
+            logger.warning("MIQP failed (%s), falling back to treemap-only", e)
+            results = warm_start
+
+        # Stage 3: 边界裁剪
+        results = self._clip_to_boundary(results)
+        results = self._validate_results_against_core_union(results, source="semantic_cpsat")
+        return results
+
+    # ----------------------------------------------------------
+    # Stage 1: Treemap Warm Start
+    # ----------------------------------------------------------
+
+    def _generate_treemap_warmstart(self) -> List[RoomResult]:
+        """Squarified Treemap 生成初始布局"""
+        areas = [r.target_area for r in self.rooms]
+        total_target = sum(areas)
+        aabb_area = self.W * self.D
+
+        # 按面积比例分配到 AABB
+        normalized = [a / total_target * aabb_area for a in areas]
+
+        rects = self._squarify(normalized, 0, 0, self.W, self.D)
+
+        warm_start = []
+        for room, rect in zip(self.rooms, rects):
+            warm_start.append(
+                RoomResult(
+                    room_id=room.room_id,
+                    x=rect[0] + self.x_min,
+                    y=rect[1] + self.y_min,
+                    width=max(rect[2], room.min_width),
+                    depth=max(rect[3], room.min_depth),
+                )
+            )
+        return warm_start
+
+    @staticmethod
+    def _squarify(
+        sizes: List[float], x: float, y: float, w: float, h: float
+    ) -> List[Tuple[float, float, float, float]]:
+        """Squarified treemap（委托到 treemap.py 模块）。"""
+        return _squarify_impl(sizes, x, y, w, h)
+
+    # ----------------------------------------------------------
+    # 拓扑冻结：Treemap → 正交位置关系 → 线性约束
+    # ----------------------------------------------------------
+
+    def _freeze_topology_from_treemap(
+        self, warm_starts: List[RoomResult],
+    ) -> List[Tuple[str, str, str]]:
+        """从 Treemap Guillotine Cut 结果提取正交相对位置关系。
+
+        Treemap 的 Guillotine Cut 保证 abs(dx) > abs(dy) 方向判断安全。
+        返回 [(room_a_id, room_b_id, relation), ...] 其中 relation ∈ {left, right, below, above}
+        """
+        relations: List[Tuple[str, str, str]] = []
+        for i, a in enumerate(warm_starts):
+            for j, b in enumerate(warm_starts):
+                if i >= j:
+                    continue
+                a_cx = a.x + a.width / 2
+                a_cy = a.y + a.depth / 2
+                b_cx = b.x + b.width / 2
+                b_cy = b.y + b.depth / 2
+                dx = b_cx - a_cx
+                dy = b_cy - a_cy
+
+                if abs(dx) > abs(dy):
+                    relations.append((a.room_id, b.room_id, "left" if dx > 0 else "right"))
+                else:
+                    relations.append((a.room_id, b.room_id, "below" if dy > 0 else "above"))
+        return relations
+
+    def _add_frozen_topology_constraints(
+        self, model, x, y, w, d, relations, SCALE: int,
+    ):
+        """将拓扑关系冻结为线性约束，消除 Big-M 二元变量 → MIQP 退化为 LP"""
+        for room_a_id, room_b_id, rel in relations:
+            ai = self.room_index.get(room_a_id)
+            bi = self.room_index.get(room_b_id)
+            if ai is None or bi is None:
+                continue
+            if rel == "left":
+                model.Add(x[ai] + w[ai] <= x[bi])
+            elif rel == "right":
+                model.Add(x[bi] + w[bi] <= x[ai])
+            elif rel == "below":
+                model.Add(y[ai] + d[ai] <= y[bi])
+            elif rel == "above":
+                model.Add(y[bi] + d[bi] <= y[ai])
+
+    # ----------------------------------------------------------
+    # 走廊挂载约束 + INFEASIBLE 防护
+    # ----------------------------------------------------------
+
+    def _add_corridor_attachment_constraints(
+        self, model, x, y, w, d, corridor_edges: List[str], SCALE: int,
+    ):
+        """强制需要走廊入口的房间贴边，含 INFEASIBLE 防护。
+
+        corridor_edges: 岛屿接触走廊的方向列表 ['south', 'north', 'west', 'east']
+        """
+        if not corridor_edges:
+            return
+
+        island_bounds = self.island.bounds  # (minx, miny, maxx, maxy)
+
+        # 选择主走廊边（取最长的走廊接触边）
+        edge_lengths: Dict[str, float] = {}
+        if "south" in corridor_edges:
+            edge_lengths["south"] = island_bounds[2] - island_bounds[0]
+        if "north" in corridor_edges:
+            edge_lengths["north"] = island_bounds[2] - island_bounds[0]
+        if "west" in corridor_edges:
+            edge_lengths["west"] = island_bounds[3] - island_bounds[1]
+        if "east" in corridor_edges:
+            edge_lengths["east"] = island_bounds[3] - island_bounds[1]
+
+        if not edge_lengths:
+            return
+
+        primary_edge = max(edge_lengths, key=lambda k: edge_lengths[k])
+        edge_length = edge_lengths[primary_edge]
+
+        # 收集需要贴边的房间，按面积降序（大房间保留走廊路权）
+        access_rooms = [
+            (i, r) for i, r in enumerate(self.rooms)
+            if getattr(r, "needs_corridor_access", True)
+        ]
+        access_rooms.sort(key=lambda ir: ir[1].target_area, reverse=True)
+
+        # INFEASIBLE 防护：边长不够时降级面积最小的房间
+        total_min_width = sum(r.min_width for _, r in access_rooms)
+        while access_rooms and total_min_width > edge_length:
+            idx, demoted = access_rooms.pop()
+            total_min_width -= demoted.min_width
+            logger.warning(
+                "Demoting %s from corridor attachment "
+                "(edge=%.1fm, needed=%.1fm)",
+                demoted.room_id, edge_length, total_min_width + demoted.min_width,
+            )
+
+        # 添加贴边硬约束
+        for i, room in access_rooms:
+            if primary_edge == "south":
+                model.Add(y[i] == 0)
+            elif primary_edge == "north":
+                model.Add(y[i] + d[i] == int(self.D * SCALE))
+            elif primary_edge == "west":
+                model.Add(x[i] == 0)
+            elif primary_edge == "east":
+                model.Add(x[i] + w[i] == int(self.W * SCALE))
+
+    # ----------------------------------------------------------
+    # Stage 2a: CP-SAT 求解器
+    # ----------------------------------------------------------
+
+    def _solve_cpsat(
+        self, warm_start: Optional[List[RoomResult]]
+    ) -> List[RoomResult]:
+        """Google OR-Tools CP-SAT 求解"""
+        try:
+            from ortools.sat.python import cp_model  # type: ignore[import-not-found]
+        except ImportError:
+            raise RuntimeError(
+                "ortools not installed. Run: pip install ortools"
+            )
+
+        SCALE = 100  # 转为 cm 精度
+        W_s = int(self.W * SCALE)
+        D_s = int(self.D * SCALE)
+
+        model = cp_model.CpModel()
+
+        # === 决策变量 ===
+        x = [model.NewIntVar(0, W_s, f"x_{i}") for i in range(self.n)]
+        y = [model.NewIntVar(0, D_s, f"y_{i}") for i in range(self.n)]
+        w = [
+            model.NewIntVar(
+                int(self.rooms[i].min_width * SCALE), W_s, f"w_{i}"
+            )
+            for i in range(self.n)
+        ]
+        d = [
+            model.NewIntVar(
+                int(self.rooms[i].min_depth * SCALE), D_s, f"d_{i}"
+            )
+            for i in range(self.n)
+        ]
+
+        # === end 变量 ===
+        x_end = [model.NewIntVar(0, W_s, f"xe_{i}") for i in range(self.n)]
+        y_end = [model.NewIntVar(0, D_s, f"ye_{i}") for i in range(self.n)]
+        for i in range(self.n):
+            model.Add(x_end[i] == x[i] + w[i])
+            model.Add(y_end[i] == y[i] + d[i])
+
+        # === 边界约束 ===
+        for i in range(self.n):
+            model.Add(x_end[i] <= W_s)
+            model.Add(y_end[i] <= D_s)
+
+        # === 不重叠约束 ===
+        x_intervals = [
+            model.NewIntervalVar(x[i], w[i], x_end[i], f"xi_{i}")
+            for i in range(self.n)
+        ]
+        y_intervals = [
+            model.NewIntervalVar(y[i], d[i], y_end[i], f"yi_{i}")
+            for i in range(self.n)
+        ]
+
+        # 禁区：bounding box 内但岛屿外（L 型缺口等）
+        from shapely.geometry import box as shapely_box
+        bbox = shapely_box(self.x_min, self.y_min, self.x_max, self.y_max)
+        forbidden = bbox.difference(self.island)
+        if not forbidden.is_empty:
+            parts = list(getattr(forbidden, 'geoms', [forbidden]))
+            for fi, part in enumerate(parts):
+                if not isinstance(part, Polygon) or part.is_empty or part.area < 0.01:
+                    continue
+                fminx, fminy, fmaxx, fmaxy = part.bounds
+                fz_x_s = int((fminx - self.x_min) * SCALE)
+                fz_y_s = int((fminy - self.y_min) * SCALE)
+                fz_w_s = max(1, int((fmaxx - fminx) * SCALE))
+                fz_d_s = max(1, int((fmaxy - fminy) * SCALE))
+                fx = model.NewIntVar(fz_x_s, fz_x_s, f"bfz_x_{fi}")
+                fy = model.NewIntVar(fz_y_s, fz_y_s, f"bfz_y_{fi}")
+                fw = model.NewIntVar(fz_w_s, fz_w_s, f"bfz_w_{fi}")
+                fd = model.NewIntVar(fz_d_s, fz_d_s, f"bfz_d_{fi}")
+                fxe = model.NewIntVar(fz_x_s + fz_w_s, fz_x_s + fz_w_s, f"bfz_xe_{fi}")
+                fye = model.NewIntVar(fz_y_s + fz_d_s, fz_y_s + fz_d_s, f"bfz_ye_{fi}")
+                x_intervals.append(model.NewIntervalVar(fx, fw, fxe, f"bfzxi_{fi}"))
+                y_intervals.append(model.NewIntervalVar(fy, fd, fye, f"bfzyi_{fi}"))
+
+        model.AddNoOverlap2D(x_intervals, y_intervals)
+
+        # === 面积约束 ===
+        area_vars = []
+        for i, room in enumerate(self.rooms):
+            area_target_s = int(room.target_area * SCALE * SCALE)
+            area_lb = int(area_target_s * (1 - room.area_tolerance))
+            area_ub = int(area_target_s * (1 + room.area_tolerance))
+            # 确保上界不超过总面积
+            area_ub = min(area_ub, W_s * D_s)
+
+            area_var = model.NewIntVar(area_lb, area_ub, f"area_{i}")
+            model.AddMultiplicationEquality(area_var, w[i], d[i])
+            area_vars.append(area_var)
+
+        # === 目标函数：最小化面积偏差 ===
+        area_deviations = []
+        for i, room in enumerate(self.rooms):
+            area_target_s = int(room.target_area * SCALE * SCALE)
+            dev = model.NewIntVar(0, W_s * D_s, f"dev_{i}")
+            diff = model.NewIntVar(-W_s * D_s, W_s * D_s, f"diff_{i}")
+            model.Add(diff == area_vars[i] - area_target_s)
+            model.AddAbsEquality(dev, diff)
+            area_deviations.append(dev)
+
+        model.Minimize(sum(area_deviations))
+
+        # === 拓扑冻结：从 Treemap 提取正交相对位置 → 线性约束替代 Big-M ===
+        if warm_start and len(warm_start) >= 2:
+            relations = self._freeze_topology_from_treemap(warm_start)
+            self._add_frozen_topology_constraints(model, x, y, w, d, relations, SCALE)
+
+        # === Warm Start Hints ===
+        if warm_start:
+            for i, ws in enumerate(warm_start):
+                if i >= self.n:
+                    break
+                model.AddHint(x[i], int((ws.x - self.x_min) * SCALE))
+                model.AddHint(y[i], int((ws.y - self.y_min) * SCALE))
+                model.AddHint(w[i], int(ws.width * SCALE))
+                model.AddHint(d[i], int(ws.depth * SCALE))
+
+        # === 求解 ===
+        solver = cp_model.CpSolver()
+        solver.parameters.max_time_in_seconds = self.time_limit
+        solver.parameters.num_search_workers = 4
+        solver.parameters.log_search_progress = True
+        try:
+            solver.log_callback = lambda msg: logger.debug("[CP-SAT] %s", str(msg).rstrip())
+        except Exception:
+            pass
+
+        status = solver.Solve(model)
+        status_name = solver.StatusName(status)
+        logger.info("CP-SAT status: %s", status_name)
+
+        if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+            raise RuntimeError(f"CP-SAT solve failed, status: {status_name}")
+
+        # === 提取结果 ===
+        results = []
+        for i, room in enumerate(self.rooms):
+            results.append(
+                RoomResult(
+                    room_id=room.room_id,
+                    x=solver.Value(x[i]) / SCALE + self.x_min,
+                    y=solver.Value(y[i]) / SCALE + self.y_min,
+                    width=solver.Value(w[i]) / SCALE,
+                    depth=solver.Value(d[i]) / SCALE,
+                )
+            )
+        return results
+
+    # ----------------------------------------------------------
+    # Stage 2b: Gurobi 求解器（可选）
+    # ----------------------------------------------------------
+
+    def _solve_gurobi(
+        self, warm_start: Optional[List[RoomResult]]
+    ) -> List[RoomResult]:
+        """Gurobi MIQP 求解，未安装时回退 CP-SAT"""
+        try:
+            import gurobipy as gp  # type: ignore[import-not-found]
+            from gurobipy import GRB  # type: ignore[import-not-found]
+        except ImportError:
+            logger.info("Gurobi not installed, falling back to CP-SAT")
+            return self._solve_cpsat(warm_start)
+
+        M = self.W + self.D  # Big-M
+
+        mdl = gp.Model("island_partition")
+        mdl.Params.TimeLimit = self.time_limit
+        mdl.Params.OutputFlag = 0
+
+        x = mdl.addVars(self.n, lb=0, ub=self.W, name="x")
+        y = mdl.addVars(self.n, lb=0, ub=self.D, name="y")
+        w = mdl.addVars(self.n, name="w")
+        d = mdl.addVars(self.n, name="d")
+
+        for i, room in enumerate(self.rooms):
+            w[i].lb = room.min_width
+            w[i].ub = self.W
+            d[i].lb = room.min_depth
+            d[i].ub = self.D
+
+        # 边界
+        for i in range(self.n):
+            mdl.addConstr(x[i] + w[i] <= self.W)
+            mdl.addConstr(y[i] + d[i] <= self.D)
+
+        # 不重叠 (Big-M)
+        for i in range(self.n):
+            for j in range(i + 1, self.n):
+                s_L = mdl.addVar(vtype=GRB.BINARY)
+                s_R = mdl.addVar(vtype=GRB.BINARY)
+                s_F = mdl.addVar(vtype=GRB.BINARY)
+                s_B = mdl.addVar(vtype=GRB.BINARY)
+                mdl.addConstr(x[i] + w[i] <= x[j] + M * (1 - s_L))
+                mdl.addConstr(x[j] + w[j] <= x[i] + M * (1 - s_R))
+                mdl.addConstr(y[i] + d[i] <= y[j] + M * (1 - s_F))
+                mdl.addConstr(y[j] + d[j] <= y[i] + M * (1 - s_B))
+                mdl.addConstr(s_L + s_R + s_F + s_B >= 1)
+
+        # 面积
+        area = mdl.addVars(self.n, name="area")
+        for i, room in enumerate(self.rooms):
+            mdl.addConstr(area[i] == w[i] * d[i])
+            mdl.addConstr(area[i] >= room.target_area * (1 - room.area_tolerance))
+            mdl.addConstr(area[i] <= room.target_area * (1 + room.area_tolerance))
+
+        obj = gp.quicksum(
+            (area[i] - self.rooms[i].target_area) ** 2 for i in range(self.n)
+        )
+        mdl.setObjective(obj, GRB.MINIMIZE)
+
+        if warm_start:
+            for i, ws in enumerate(warm_start):
+                if i >= self.n:
+                    break
+                x[i].Start = ws.x - self.x_min
+                y[i].Start = ws.y - self.y_min
+                w[i].Start = ws.width
+                d[i].Start = ws.depth
+
+        mdl.optimize()
+
+        if mdl.Status not in (GRB.OPTIMAL, GRB.TIME_LIMIT, GRB.SUBOPTIMAL):
+            raise RuntimeError(f"Gurobi solve failed, status: {mdl.Status}")
+
+        results = []
+        for i, room in enumerate(self.rooms):
+            results.append(
+                RoomResult(
+                    room_id=room.room_id,
+                    x=x[i].X + self.x_min,
+                    y=y[i].X + self.y_min,
+                    width=w[i].X,
+                    depth=d[i].X,
+                )
+            )
+        return results
+
+    # ----------------------------------------------------------
+    # Stage 3: 边界裁剪
+    # ----------------------------------------------------------
+
+    def _clip_to_boundary(self, results: List[RoomResult]) -> List[RoomResult]:
+        """将房间裁剪到实际岛屿边界"""
+        clipped = []
+        for room in results:
+            if self.island.contains(room.polygon):
+                clipped.append(room)
+                continue
+
+            clipped_geom = room.polygon.intersection(self.island)
+
+            if clipped_geom.is_empty or clipped_geom.area < 0.5:
+                logger.warning(
+                    "Room %s clipped to empty, removing", room.room_id
+                )
+                continue
+
+            minx, miny, maxx, maxy = clipped_geom.bounds
+            bounds_area = (maxx - minx) * (maxy - miny)
+            if bounds_area > 0 and abs(clipped_geom.area - bounds_area) / bounds_area < 0.01:
+                # 裁剪后仍是矩形
+                clipped.append(RoomResult(
+                    room_id=room.room_id, x=minx, y=miny,
+                    width=maxx - minx, depth=maxy - miny,
+                ))
+            else:
+                # 非矩形裁剪 — 缩小到实际面积
+                w_clip = maxx - minx
+                h_clip = maxy - miny
+                if w_clip > 0 and h_clip > 0:
+                    ratio = clipped_geom.area / bounds_area
+                    if w_clip >= h_clip:
+                        w_clip *= ratio
+                    else:
+                        h_clip *= ratio
+                    cx = clipped_geom.centroid.x
+                    cy = clipped_geom.centroid.y
+                    clipped.append(RoomResult(
+                        room_id=room.room_id,
+                        x=max(minx, cx - w_clip / 2),
+                        y=max(miny, cy - h_clip / 2),
+                        width=w_clip, depth=h_clip,
+                    ))
+        return clipped
+
+
+# ============================================================
+# 便捷函数
+# ============================================================
+
+
+def partition_island(
+    island_polygon: Polygon,
+    room_specs: List[RoomSpec],
+    solver: str = "cpsat",
+    time_limit: float = 10.0,
+    use_warm_start: bool = True,
+) -> List[RoomResult]:
+    """
+    岛屿房间划分便捷函数
+
+    Args:
+        island_polygon: 岛屿边界
+        room_specs: 房间规格列表
+        solver: 'cpsat' | 'gurobi'
+        time_limit: 求解时间上限（秒）
+        use_warm_start: 是否用 Treemap 热启动
+
+    Returns:
+        房间划分结果列表
+    """
+    solver_inst = IslandPartitionSolver(
+        island_polygon=island_polygon,
+        rooms=room_specs,
+        solver=solver,
+        time_limit=time_limit,
+        use_warm_start=use_warm_start,
+    )
+    return solver_inst.solve()
+
+
+# ============================================================
+# 语义感知求解器
+# ============================================================
+
+
+class SemanticIslandPartitionSolver:
+    """
+    语义感知的岛屿房间划分求解器。
+
+    相比 IslandPartitionSolver，新增：
+    1. 分层 Treemap warm start（按邻接聚类 + 功能分区排序）
+    2. 宽高比硬约束
+    3. 采光约束（需要窗的房间靠外墙）
+    4. 邻接必须/禁止硬约束
+    5. 多目标优化（面积 + 邻接距离 + 分区紧凑度 + 宽高比惩罚）
+
+    回退机制：语义求解失败时降级到旧 IslandPartitionSolver。
+    """
+
+    def __init__(
+        self,
+        island_polygon: Polygon,
+        rooms: List[SemanticRoomSpec],
+        adjacency_graph: Dict[str, List[str]],
+        island_context: IslandContext,
+        config: Optional[SolverConfig] = None,
+        coverage_policy: str = "legacy",
+        coverage_debt_plan: Optional[Any] = None,
+        core_contract: Optional[CoreFootprintContract] = None,
+    ):
+        self.island = island_polygon
+        self.rooms = rooms
+        self.adjacency = adjacency_graph
+        self.context = island_context
+        self.config = config or SolverConfig()
+        self.coverage_policy = str(coverage_policy or "legacy").strip().lower()
+        self.coverage_debt_plan = coverage_debt_plan
+        self.core_contract = core_contract
+        self.last_solver_metadata: Dict[str, Any] = {}
+        self._last_cpsat_metadata: Dict[str, Any] = {}
+        self._last_core_forbidden_metadata: Dict[str, Any] = {}
+
+        # 走廊边信息
+        self.corridor_edges = island_context.corridor_edges if hasattr(island_context, 'corridor_edges') else []
+
+        # 边界
+        x_min, y_min, x_max, y_max = island_polygon.bounds
+        self.x_min, self.y_min = x_min, y_min
+        self.W = x_max - x_min
+        self.D = y_max - y_min
+
+        # 索引
+        self.room_index: Dict[str, int] = {r.room_id: i for i, r in enumerate(rooms)}
+        self.n = len(rooms)
+
+        # 按 zone 分组
+        self.zones = self._group_by_zone()
+
+        # 修正不合理的 min_width/min_depth
+        for r in self.rooms:
+            if r.min_width > self.W * 0.9:
+                r.min_width = self.W * 0.9
+            if r.min_depth > self.D * 0.9:
+                r.min_depth = self.D * 0.9
+
+    def _core_union(self) -> Optional[BaseGeometry]:
+        contract = self.core_contract
+        core = getattr(contract, "core_union", None)
+        if core is None or getattr(core, "is_empty", True):
+            return None
+        try:
+            return core.buffer(0)
+        except Exception:
+            return core
+
+    def _core_context_metadata(self) -> Dict[str, Any]:
+        contract = self.core_contract
+        return {
+            "core_contract_id": getattr(contract, "core_contract_id", None),
+            "core_contract_version": getattr(contract, "version", None),
+            "core_union_hash": getattr(contract, "core_union_hash", None),
+            "core_union_area": float(getattr(contract, "core_union_area", 0.0) or 0.0),
+            "core_union_bounds": tuple(getattr(contract, "core_union_bounds", ()) or ()),
+        }
+
+    @staticmethod
+    def _polygon_parts(geom: BaseGeometry, *, min_area: float = 0.01) -> List[Polygon]:
+        if geom is None or getattr(geom, "is_empty", True):
+            return []
+        if isinstance(geom, Polygon):
+            return [geom] if float(getattr(geom, "area", 0.0) or 0.0) > min_area else []
+        parts: List[Polygon] = []
+        for part in getattr(geom, "geoms", []) or []:
+            if isinstance(part, Polygon) and not part.is_empty and float(part.area) > min_area:
+                parts.append(part)
+        return parts
+
+    def _raise_core_solver_invariant(
+        self,
+        *,
+        stage: str,
+        message: str,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        plan = self.coverage_debt_plan
+        payload: Dict[str, Any] = {
+            "failure_kind": "core_generation",
+            "topology_mode": "grid_growth" if self.coverage_policy in {"coverage_debt", "grid_growth_loose", "loose_explicit"} else self.coverage_policy,
+            "coverage_policy": self.coverage_policy,
+            "coverage_debt_plan_id": str(getattr(plan, "plan_id", "") or ""),
+            **self._core_context_metadata(),
+        }
+        if metadata:
+            payload.update(metadata)
+        raise LayoutGeometryInvariantError(
+            message,
+            stage=stage,
+            floor_id=str(getattr(plan, "floor_id", "") or ""),
+            metadata=payload,
+        )
+
+    def _group_by_zone(self) -> Dict[ZoneType, List[str]]:
+        zones: Dict[ZoneType, List[str]] = {}
+        for room in self.rooms:
+            if room.zone not in zones:
+                zones[room.zone] = []
+            zones[room.zone].append(room.room_id)
+        return zones
+
+    def _get_forbidden_zones(self) -> List[Tuple[float, float, float, float]]:
+        """
+        计算禁区：bounding box 内但岛屿 polygon 外的区域。
+        将每个连通分量取 bounding box 作为禁止矩形。
+        返回 [(x, y, w, d), ...] 世界坐标。
+        """
+        from shapely.geometry import box as shapely_box
+        bbox = shapely_box(self.x_min, self.y_min,
+                           self.x_min + self.W, self.y_min + self.D)
+        forbidden_geoms: List[BaseGeometry] = [bbox.difference(self.island)]
+
+        core_bbox_context_area = 0.0
+        core_island_overlap_area = 0.0
+        core_forbidden_parts: List[Polygon] = []
+        core = self._core_union()
+        if core is not None:
+            try:
+                core_context = core.intersection(bbox)
+                core_bbox_context_area = float(getattr(core_context, "area", 0.0) or 0.0)
+                core_island_overlap = core.intersection(self.island)
+                core_island_overlap_area = float(getattr(core_island_overlap, "area", 0.0) or 0.0)
+                core_forbidden_parts = self._polygon_parts(core_context, min_area=CORE_OVERLAP_EPSILON_AREA)
+                if core_bbox_context_area > CORE_OVERLAP_EPSILON_AREA:
+                    forbidden_geoms.append(core_context)
+            except Exception as exc:
+                self._raise_core_solver_invariant(
+                    stage="core_generation_invariant_failed",
+                    message=f"Failed to scope core forbidden zone to island context: {exc}",
+                    metadata={"reason": "core_forbidden_scope_failed"},
+                )
+
+        try:
+            forbidden = unary_union([g for g in forbidden_geoms if g is not None and not getattr(g, "is_empty", True)]).buffer(0)
+        except Exception:
+            forbidden = forbidden_geoms[0]
+        parts = self._polygon_parts(forbidden, min_area=0.01)
+
+        self._last_core_forbidden_metadata = {
+            **self._core_context_metadata(),
+            "island_bounds": tuple(float(v) for v in bbox.bounds),
+            "forbidden_core_area": float(core_bbox_context_area),
+            "core_bbox_context_area": float(core_bbox_context_area),
+            "core_island_overlap_area": float(core_island_overlap_area),
+            "forbidden_core_parts": len(core_forbidden_parts),
+            "upstream_core_leak_warning": bool(core_island_overlap_area > CORE_OVERLAP_EPSILON_AREA),
+            "forbidden_deduplicated": True,
+        }
+        if core is not None:
+            logger.info(
+                "[CORE] Solver forbidden core footprint | floor=%s | island=%s | contract=%s | "
+                "hash=%s | forbidden_core_area=%.4fm2 | core_island_overlap=%.4fm2 | parts=%d | upstream_core_leak_warning=%s",
+                str(getattr(self.coverage_debt_plan, "floor_id", "") or ""),
+                str(getattr(self.coverage_debt_plan, "island_id", "") or ""),
+                self._last_core_forbidden_metadata.get("core_contract_id"),
+                self._last_core_forbidden_metadata.get("core_union_hash"),
+                core_bbox_context_area,
+                core_island_overlap_area,
+                len(core_forbidden_parts),
+                bool(self._last_core_forbidden_metadata.get("upstream_core_leak_warning")),
+            )
+
+        zones = []
+        seen = set()
+        for part in parts:
+            minx, miny, maxx, maxy = part.bounds
+            zone = (float(minx), float(miny), float(maxx - minx), float(maxy - miny))
+            key = tuple(round(v, 4) for v in zone)
+            if key in seen:
+                continue
+            seen.add(key)
+            zones.append(zone)
+        zones.sort(key=lambda z: (round(z[1], 4), round(z[0], 4), round(z[2], 4), round(z[3], 4)))
+        return zones
+
+    # ----------------------------------------------------------
+    # 主入口
+    # ----------------------------------------------------------
+
+    def solve(self) -> List[RoomResult]:
+        """
+        求解入口：分层 Treemap → CP-SAT MIQP → 边界裁剪。
+        语义求解失败时降级到旧 solver。
+        """
+        dummy_count = sum(1 for r in self.rooms if getattr(r, "is_dummy", False))
+        max_dummy = int(getattr(self.config, "dummy_max_per_island", 3) or 3)
+        if dummy_count > max_dummy:
+            raise SemanticSolveError(
+                f"Too many dummy rooms in island: {dummy_count}>{max_dummy}",
+                status_name="DUMMY_LIMIT",
+            )
+
+        # Stage 1: 分层 Treemap warm start
+        t0 = time.perf_counter()
+        warm_start = self._generate_warm_start()
+        logger.info(
+            "Hierarchical treemap warm start: %.1fms, %d rooms",
+            (time.perf_counter() - t0) * 1000, len(warm_start),
+        )
+
+        # 快捷路径：≤2 个房间直接用 treemap，跳过 MIQP
+        if self.n <= 2:
+            if self.coverage_policy in {"coverage_debt", "grid_growth_loose", "loose_explicit"}:
+                logger.info("≤2 rooms, using coverage_debt_treemap (skip semantic MIQP)")
+                results = self._coverage_debt_treemap_fallback(
+                    warm_start,
+                    elapsed_s=(time.perf_counter() - t0),
+                    error="skip_small_n",
+                )
+                return results
+            logger.info("≤2 rooms, using treemap-only (skip semantic MIQP)")
+            self.last_solver_metadata = {
+                "status_name": "TREEMAP_ONLY",
+                "attempt_name": "skip_small_n",
+                "elapsed_s": (time.perf_counter() - t0),
+                "time_limit_s": float(self.config.time_limit),
+            }
+            # 将 WarmStartRect 转为 RoomResult
+            results = []
+            for ws in warm_start:
+                results.append(RoomResult(
+                    room_id=ws.room_id,
+                    x=ws.x, y=ws.y,
+                    width=ws.width, depth=ws.depth,
+                ))
+            results = self._clip_to_boundary(results)
+            return results
+
+        # Stage 2: 语义 CP-SAT（受控重试：Strict -> Drop -> Relax）
+        attempts = [
+            {
+                "name": "strict",
+                "corridor_mode": "strict",
+                "area_tolerance": float(self.config.area_tolerance),
+                "aspect_relax_factor": 1.0,
+            },
+            {
+                "name": "drop_non_strong_corridor_access",
+                "corridor_mode": "strong_only",
+                "area_tolerance": float(self.config.area_tolerance),
+                "aspect_relax_factor": 1.0,
+            },
+            {
+                "name": "relax_area_and_aspect",
+                "corridor_mode": "strong_only",
+                "area_tolerance": max(float(self.config.area_tolerance), 0.20),
+                "aspect_relax_factor": 1.15,
+            },
+            {
+                "name": "soft_corridor_access",
+                "corridor_mode": "soft",
+                "area_tolerance": max(float(self.config.area_tolerance), 0.20),
+                "aspect_relax_factor": 1.15,
+            },
+        ]
+
+        results: List[RoomResult] = []
+        solved = False
+        last_error: Optional[Exception] = None
+
+        for attempt in attempts:
+            try:
+                orig_real_corridor_reward = int(getattr(self.config, "real_corridor_reward", 0) or 0)
+                if str(attempt.get("corridor_mode", "") or "").lower() == "soft":
+                    self.config.real_corridor_reward = max(orig_real_corridor_reward, 20000)
+                t1 = time.perf_counter()
+                results, dropped_rooms = self._solve_cpsat(
+                    warm_start,
+                    corridor_mode=str(attempt["corridor_mode"]),
+                    area_tolerance=float(attempt["area_tolerance"]),
+                    aspect_relax_factor=float(attempt["aspect_relax_factor"]),
+                )
+                elapsed_ms = (time.perf_counter() - t1) * 1000
+                self.last_solver_metadata = dict(self._last_cpsat_metadata)
+                self.last_solver_metadata.update(
+                    {
+                        "attempt_name": str(attempt["name"]),
+                        "elapsed_s": elapsed_ms / 1000.0,
+                        "area_tolerance": float(attempt["area_tolerance"]),
+                        "aspect_relax_factor": float(attempt["aspect_relax_factor"]),
+                        "dropped_corridor_access": list(dropped_rooms),
+                    }
+                )
+                logger.info(
+                    "Semantic MIQP solved in %.1fms (attempt=%s, area_tolerance=%.2f, aspect_relax=%.2f, dropped_corridor_access=%s)",
+                    elapsed_ms,
+                    attempt["name"],
+                    float(attempt["area_tolerance"]),
+                    float(attempt["aspect_relax_factor"]),
+                    dropped_rooms,
+                )
+                if attempt["name"] != "strict":
+                    logger.warning(
+                        "Solved with relaxed constraints: attempt=%s, dropped_corridor_access=%s, area_tolerance=%.2f, aspect_relax=%.2f",
+                        attempt["name"],
+                        dropped_rooms,
+                        float(attempt["area_tolerance"]),
+                        float(attempt["aspect_relax_factor"]),
+                    )
+                solved = True
+                break
+            except SemanticSolveError as e:
+                last_error = e
+                logger.warning(
+                    "Semantic MIQP attempt failed (attempt=%s, status=%s, reason=%s)",
+                    attempt["name"],
+                    e.status_name,
+                    e,
+                )
+                # 仅在不可行时继续软化；其他错误直接回退
+                if not e.is_infeasible:
+                    break
+                continue
+            except Exception as e:
+                last_error = e
+                logger.warning("Semantic MIQP attempt errored (attempt=%s, reason=%s)", attempt["name"], e)
+                break
+            finally:
+                try:
+                    self.config.real_corridor_reward = orig_real_corridor_reward
+                except Exception:
+                    pass
+
+        if not solved:
+            if self.coverage_policy in {"coverage_debt", "grid_growth_loose", "loose_explicit"}:
+                if not STAGE2A2_COVERAGE_DEBT_FALLBACK_ENABLED:
+                    raise SemanticSolveError(
+                        "coverage_debt solver failed and debt-aware fallback is disabled",
+                        status_name="COVERAGE_DEBT_SOLVER_FAILED",
+                    )
+                logger.warning(
+                    "[CONTRACT] Coverage debt fallback selected | reason=semantic_miqp_failed | error=%s",
+                    last_error or "unknown error",
+                )
+                results = self._coverage_debt_treemap_fallback(
+                    warm_start,
+                    elapsed_s=None,
+                    error=str(last_error or "unknown error"),
+                )
+                return results
+            logger.warning(
+                "Semantic MIQP failed (%s), falling back to basic solver",
+                last_error or "unknown error",
+            )
+            results = self._fallback_solve()
+            self.last_solver_metadata = {
+                "status_name": "FALLBACK",
+                "attempt_name": "basic_solver",
+                "elapsed_s": None,
+                "time_limit_s": float(self.config.time_limit),
+                "error": str(last_error or "unknown error"),
+            }
+
+        # Stage 3: 边界裁剪
+        results = self._clip_to_boundary(results)
+        return results
+
+    def _generate_warm_start(self) -> List[WarmStartRect]:
+        bounds = (self.x_min, self.y_min,
+                  self.x_min + self.W, self.y_min + self.D)
+        return hierarchical_treemap(bounds, self.rooms, self.adjacency)
+
+    def _warm_start_to_room_results(self, warm_start: List[WarmStartRect]) -> List[RoomResult]:
+        results: List[RoomResult] = []
+        for ws in warm_start:
+            results.append(RoomResult(
+                room_id=ws.room_id,
+                x=ws.x,
+                y=ws.y,
+                width=ws.width,
+                depth=ws.depth,
+            ))
+        return results
+
+    @staticmethod
+    def _covered_area(results: List[RoomResult]) -> float:
+        total = 0.0
+        for room in results or []:
+            poly = getattr(room, "polygon", None)
+            try:
+                total += float(poly.area)
+            except Exception:
+                total += max(0.0, float(getattr(room, "width", 0.0) or 0.0) * float(getattr(room, "depth", 0.0) or 0.0))
+        return float(total)
+
+    def _target_area_for_room(self, room_id: str, fallback: float) -> float:
+        for spec in self.rooms:
+            if str(getattr(spec, "room_id", "")) == str(room_id):
+                return max(float(getattr(spec, "target_area", fallback) or fallback), 0.01)
+        return max(float(fallback or 0.0), 0.01)
+
+    def _room_spec_for_id(self, room_id: str) -> Optional[SemanticRoomSpec]:
+        for spec in self.rooms:
+            if str(getattr(spec, "room_id", "")) == str(room_id):
+                return spec
+        return None
+
+    def _room_area_limits(self, spec: Optional[SemanticRoomSpec], fallback_area: float) -> Tuple[float, float]:
+        target = max(float(getattr(spec, "target_area", fallback_area) if spec is not None else fallback_area), 0.01)
+        tol = float(getattr(self.config, "dummy_area_tolerance", 0.30) if bool(getattr(spec, "is_dummy", False)) else getattr(self.config, "area_tolerance", 0.15))
+        tol = max(tol, 0.20 if self.coverage_policy == "coverage_debt" else tol)
+        return max(0.01, target * (1.0 - tol)), max(0.01, target * (1.0 + tol))
+
+    def _coverage_debt_goal_scale(self) -> float:
+        plan = self.coverage_debt_plan
+        target_sum = float(getattr(plan, "assigned_explicit_target_sum", 0.0) or 0.0)
+        effective_min = float(getattr(plan, "effective_solver_coverage_min", 0.0) or 0.0)
+        if target_sum <= 0.0 or effective_min <= 0.0:
+            return 1.0
+        return max(1.0, effective_min / target_sum)
+
+    def _coverage_debt_goal_area(self, spec: Optional[SemanticRoomSpec], fallback_area: float) -> float:
+        target = self._target_area_for_room(str(getattr(spec, "room_id", "")) if spec is not None else "", fallback_area)
+        min_area, max_area = self._room_area_limits(spec, fallback_area)
+        return min(max(target * self._coverage_debt_goal_scale(), min_area), max_area)
+
+    def _core_safe_domain(self) -> BaseGeometry:
+        domain: BaseGeometry = self.island
+        core = self._core_union()
+        if core is not None:
+            domain = domain.difference(core)
+        try:
+            domain = domain.buffer(0)
+        except Exception:
+            pass
+        if getattr(domain, "is_empty", True):
+            self._raise_core_solver_invariant(
+                stage="coverage_debt_fallback_infeasible",
+                message="coverage_debt_treemap has no usable island polygon after core exclusion",
+                metadata={
+                    "failure_kind": "coverage_debt_fallback",
+                    "source": "coverage_debt_treemap",
+                    "reason": "empty_core_safe_domain",
+                },
+            )
+        return domain
+
+    def _candidate_dimensions(self, warm: RoomResult) -> List[Tuple[float, float]]:
+        spec = self._room_spec_for_id(str(warm.room_id))
+        goal_area = self._coverage_debt_goal_area(spec, warm.actual_area)
+        min_area, max_area = self._room_area_limits(spec, warm.actual_area)
+        min_w = max(0.10, float(getattr(spec, "min_width", 0.10) if spec is not None else 0.10))
+        min_d = max(0.10, float(getattr(spec, "min_depth", 0.10) if spec is not None else 0.10))
+        ar_min, ar_max = getattr(spec, "aspect_ratio_range", (0.5, 2.0)) if spec is not None else (0.5, 2.0)
+        ar_values = [
+            max(0.20, min(5.0, warm.width / max(warm.depth, 1e-9))),
+            1.0,
+            float(ar_min),
+            float(ar_max),
+            (float(ar_min) + float(ar_max)) / 2.0,
+        ]
+        dims: List[Tuple[float, float]] = []
+        seen = set()
+        for ar in ar_values:
+            if ar <= 0.0:
+                continue
+            w = max(min_w, (goal_area * ar) ** 0.5)
+            d = max(min_d, goal_area / max(w, 1e-9))
+            for ww, dd in ((w, d), (d, w)):
+                area = ww * dd
+                if area + 1e-6 < min_area or area - 1e-6 > max_area:
+                    continue
+                if ww > self.W + 1e-6 or dd > self.D + 1e-6:
+                    continue
+                key = (round(ww, 3), round(dd, 3))
+                if key in seen:
+                    continue
+                seen.add(key)
+                dims.append((float(ww), float(dd)))
+        if not dims:
+            dims.append((max(min_w, min(warm.width, self.W)), max(min_d, min(warm.depth, self.D))))
+        return dims
+
+    def _touches_any_edge(self, rect: Polygon, edges: List[str], *, tolerance: float = 0.15) -> bool:
+        if not edges:
+            return True
+        minx, miny, maxx, maxy = rect.bounds
+        checks = {
+            "south": abs(miny - self.y_min) <= tolerance,
+            "north": abs(maxy - (self.y_min + self.D)) <= tolerance,
+            "west": abs(minx - self.x_min) <= tolerance,
+            "east": abs(maxx - (self.x_min + self.W)) <= tolerance,
+        }
+        return any(checks.get(str(edge), False) for edge in edges)
+
+    def _candidate_is_valid(
+        self,
+        rect: Polygon,
+        *,
+        spec: Optional[SemanticRoomSpec],
+        placed: List[RoomResult],
+        domain: BaseGeometry,
+    ) -> Tuple[bool, str]:
+        if rect.is_empty or rect.area <= 0.0:
+            return False, "empty"
+        outside_area = float(rect.difference(domain).area)
+        if outside_area > CORE_OVERLAP_EPSILON_AREA:
+            return False, "outside_island_polygon"
+        core = self._core_union()
+        if core is not None and float(rect.intersection(core).area) > CORE_OVERLAP_EPSILON_AREA:
+            return False, "core_overlap"
+        for other in placed:
+            if float(rect.intersection(other.polygon).area) > CORE_OVERLAP_EPSILON_AREA:
+                return False, "room_overlap"
+        area = float(rect.area)
+        min_area, max_area = self._room_area_limits(spec, area)
+        if area + 1e-6 < min_area or area - 1e-6 > max_area:
+            return False, "area_tolerance"
+        minx, miny, maxx, maxy = rect.bounds
+        w = maxx - minx
+        d = maxy - miny
+        ar_min, ar_max = getattr(spec, "aspect_ratio_range", (0.5, 2.0)) if spec is not None else (0.5, 2.0)
+        aspect = w / max(d, 1e-9)
+        if aspect + 1e-6 < float(ar_min) or aspect - 1e-6 > float(ar_max):
+            return False, "aspect_tolerance"
+        if bool(getattr(spec, "needs_corridor_access", True)) and self.corridor_edges and not self._touches_any_edge(rect, list(self.corridor_edges)):
+            return False, "corridor_access"
+        if bool(getattr(spec, "needs_window", False)) and getattr(self.context, "exterior_walls", None):
+            if not self._touches_any_edge(rect, list(getattr(self.context, "exterior_walls", []) or [])):
+                return False, "window_access"
+        return True, "ok"
+
+    def _candidate_rectangles(self, warm: RoomResult, *, domain: BaseGeometry) -> List[RoomResult]:
+        minx, miny, maxx, maxy = domain.bounds
+        warm_cx, warm_cy = warm.center
+        candidates: List[Tuple[float, RoomResult]] = []
+        seen = set()
+
+        for width, depth in self._candidate_dimensions(warm):
+            if width <= 0.0 or depth <= 0.0 or width > (maxx - minx) + 1e-6 or depth > (maxy - miny) + 1e-6:
+                continue
+            x_values = {warm.x, warm_cx - width / 2.0, minx, maxx - width}
+            y_values = {warm.y, warm_cy - depth / 2.0, miny, maxy - depth}
+            if "west" in self.corridor_edges or "west" in getattr(self.context, "exterior_walls", []):
+                x_values.add(minx)
+            if "east" in self.corridor_edges or "east" in getattr(self.context, "exterior_walls", []):
+                x_values.add(maxx - width)
+            if "south" in self.corridor_edges or "south" in getattr(self.context, "exterior_walls", []):
+                y_values.add(miny)
+            if "north" in self.corridor_edges or "north" in getattr(self.context, "exterior_walls", []):
+                y_values.add(maxy - depth)
+
+            x = minx
+            while x <= maxx - width + 1e-6:
+                x_values.add(round(x, 4))
+                x += TREEMAP_REPACK_STEP
+            y = miny
+            while y <= maxy - depth + 1e-6:
+                y_values.add(round(y, 4))
+                y += TREEMAP_REPACK_STEP
+
+            for x0 in x_values:
+                for y0 in y_values:
+                    x0 = min(max(float(x0), minx), maxx - width)
+                    y0 = min(max(float(y0), miny), maxy - depth)
+                    key = (round(x0, 3), round(y0, 3), round(width, 3), round(depth, 3))
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    candidate = RoomResult(room_id=warm.room_id, x=x0, y=y0, width=width, depth=depth)
+                    cx, cy = candidate.center
+                    score = abs(cx - warm_cx) + abs(cy - warm_cy) + abs(candidate.actual_area - warm.actual_area) * 0.05
+                    candidates.append((score, candidate))
+
+        candidates.sort(key=lambda item: (round(item[0], 6), str(item[1].room_id), round(item[1].y, 4), round(item[1].x, 4)))
+        return [candidate for _, candidate in candidates[:TREEMAP_MAX_CANDIDATES_PER_ROOM]]
+
+    def _repack_coverage_debt_treemap(self, warm_results: List[RoomResult]) -> Tuple[List[RoomResult], Dict[str, Any]]:
+        domain = self._core_safe_domain()
+        placed: List[RoomResult] = []
+        repacked_rooms: List[str] = []
+        rejected_core_overlap = 0
+        rejection_counts: Dict[str, int] = {}
+        ordered = sorted(
+            warm_results,
+            key=lambda room: (-self._target_area_for_room(str(room.room_id), room.actual_area), str(room.room_id)),
+        )
+        for warm in ordered:
+            spec = self._room_spec_for_id(str(warm.room_id))
+            chosen: Optional[RoomResult] = None
+            for candidate in self._candidate_rectangles(warm, domain=domain):
+                ok, reason = self._candidate_is_valid(candidate.polygon, spec=spec, placed=placed, domain=domain)
+                if ok:
+                    chosen = candidate
+                    break
+                rejection_counts[reason] = rejection_counts.get(reason, 0) + 1
+                if reason == "core_overlap":
+                    rejected_core_overlap += 1
+            if chosen is None:
+                self._raise_core_solver_invariant(
+                    stage="coverage_debt_fallback_infeasible",
+                    message=f"coverage_debt_treemap could not place a core-safe rectangle for room={warm.room_id}",
+                    metadata={
+                        "failure_kind": "coverage_debt_fallback",
+                        "source": "coverage_debt_treemap",
+                        "room_id": str(warm.room_id),
+                        "reason": "no_core_safe_placement_meets_constraints",
+                        "fallback_domain_source": "actual_island_polygon",
+                        "fallback_domain_is_bbox": False,
+                        "rejection_counts": dict(rejection_counts),
+                        "rejected_core_overlap_candidates": rejected_core_overlap,
+                    },
+                )
+            if (
+                abs(chosen.x - warm.x) > 1e-6
+                or abs(chosen.y - warm.y) > 1e-6
+                or abs(chosen.width - warm.width) > 1e-6
+                or abs(chosen.depth - warm.depth) > 1e-6
+            ):
+                repacked_rooms.append(str(warm.room_id))
+            placed.append(chosen)
+
+        result_by_id = {str(room.room_id): room for room in placed}
+        results = [result_by_id[str(room.room_id)] for room in warm_results if str(room.room_id) in result_by_id]
+        meta = {
+            "core_aware_placement": True,
+            "fallback_domain_source": "actual_island_polygon",
+            "fallback_domain_is_bbox": False,
+            "repacked_rooms": repacked_rooms,
+            "rejected_core_overlap_candidates": rejected_core_overlap,
+            "rejection_counts": dict(rejection_counts),
+            "max_candidates_per_room": TREEMAP_MAX_CANDIDATES_PER_ROOM,
+        }
+        return results, meta
+
+    def _validate_results_against_core_union(
+        self,
+        results: List[RoomResult],
+        *,
+        source: str,
+    ) -> List[RoomResult]:
+        core = self._core_union()
+        if core is None:
+            return results
+        clean: List[RoomResult] = []
+        clip_actions: List[Dict[str, Any]] = []
+        for room in results or []:
+            room_poly = room.polygon
+            try:
+                overlap = room_poly.intersection(core)
+                overlap_area = float(getattr(overlap, "area", 0.0) or 0.0)
+            except Exception as exc:
+                self._raise_core_solver_invariant(
+                    stage="core_generation_invariant_failed",
+                    message=f"Failed to validate room/core overlap: {exc}",
+                    metadata={"source": source, "room_id": str(room.room_id), "reason": "room_core_overlap_check_failed"},
+                )
+            if overlap_area <= CORE_OVERLAP_EPSILON_AREA:
+                clean.append(room)
+                continue
+
+            target_area = self._target_area_for_room(str(room.room_id), room.actual_area)
+            drift_threshold = max(0.10, 0.02 * target_area)
+            clipped = room_poly.difference(core).buffer(0)
+            clipped_area = float(getattr(clipped, "area", 0.0) or 0.0)
+            if clipped.is_empty or clipped_area < 0.50 or overlap_area > drift_threshold:
+                self._raise_core_solver_invariant(
+                    stage="core_generation_invariant_failed",
+                    message=(
+                        "Room intersects core_union after solver/fallback; refusing silent distorted clip "
+                        f"(room={room.room_id}, overlap={overlap_area:.3f}m2)"
+                    ),
+                    metadata={
+                        "source": source,
+                        "room_id": str(room.room_id),
+                        "overlap_area": overlap_area,
+                        "overlap_bbox": tuple(float(v) for v in overlap.bounds) if not overlap.is_empty else None,
+                        "room_clip_area_drift": overlap_area,
+                        "room_clip_area_drift_threshold": drift_threshold,
+                    },
+                )
+            minx, miny, maxx, maxy = clipped.bounds
+            bounds_area = max(0.0, float(maxx - minx) * float(maxy - miny))
+            if bounds_area <= 0.0 or abs(clipped_area - bounds_area) / max(bounds_area, 1e-9) > 0.01:
+                self._raise_core_solver_invariant(
+                    stage="core_generation_invariant_failed",
+                    message=(
+                        "Core clipping produced a non-rectangular room that RoomResult cannot represent safely "
+                        f"(room={room.room_id})"
+                    ),
+                    metadata={
+                        "source": source,
+                        "room_id": str(room.room_id),
+                        "overlap_area": overlap_area,
+                        "overlap_bbox": tuple(float(v) for v in overlap.bounds) if not overlap.is_empty else None,
+                        "clipped_area": clipped_area,
+                        "clipped_bounds_area": bounds_area,
+                    },
+                )
+            clean.append(RoomResult(
+                room_id=room.room_id,
+                x=float(minx),
+                y=float(miny),
+                width=float(maxx - minx),
+                depth=float(maxy - miny),
+            ))
+            clip_actions.append({
+                "room_id": str(room.room_id),
+                "overlap_area": overlap_area,
+                "final_area": clipped_area,
+            })
+        if clip_actions:
+            logger.warning(
+                "[CORE] Solver output clipped against core_union | source=%s | actions=%s",
+                source,
+                clip_actions,
+            )
+        return clean
+
+    def _coverage_debt_treemap_fallback(
+        self,
+        warm_start: List[WarmStartRect],
+        *,
+        elapsed_s: Optional[float],
+        error: str,
+    ) -> List[RoomResult]:
+        plan = self.coverage_debt_plan
+        if plan is None:
+            raise SemanticSolveError(
+                "coverage_debt fallback requires CoverageDebtPlan",
+                status_name="COVERAGE_DEBT_PLAN_MISSING",
+            )
+        warm_results = self._warm_start_to_room_results(warm_start)
+        results, placement_meta = self._repack_coverage_debt_treemap(warm_results)
+        results = self._validate_results_against_core_union(results, source="coverage_debt_treemap")
+        actual_covered = self._covered_area(results)
+        effective_min = float(getattr(plan, "effective_solver_coverage_min", 0.0) or 0.0)
+        tolerance = 0.50
+        if actual_covered + tolerance < effective_min:
+            self._raise_core_solver_invariant(
+                stage="coverage_debt_fallback_infeasible",
+                message=(
+                    "coverage_debt_treemap fallback could not satisfy explicit coverage contract "
+                    f"without violating core/island geometry: actual={actual_covered:.2f}m2 "
+                    f"effective_min={effective_min:.2f}m2"
+                ),
+                metadata={
+                    "failure_kind": "coverage_debt_fallback",
+                    "source": "coverage_debt_treemap",
+                    "reason": "no_core_safe_placement_meets_effective_min",
+                    **placement_meta,
+                },
+            )
+        expected_residual = max(0.0, float(getattr(plan, "raw_coverage_min", 0.0) or 0.0) - actual_covered)
+        self.last_solver_metadata = {
+            "status_name": "FALLBACK",
+            "attempt_name": "coverage_debt_treemap",
+            "fallback_mode": "coverage_debt_treemap",
+            "coverage_policy": "coverage_debt",
+            **self._core_context_metadata(),
+            "core_forbidden": dict(self._last_core_forbidden_metadata),
+            "coverage_debt_plan_id": str(getattr(plan, "plan_id", "")),
+            "coverage_debt_plan": plan.to_dict() if hasattr(plan, "to_dict") else None,
+            "actual_covered_area": actual_covered,
+            "effective_solver_coverage_min": effective_min,
+            "expected_residual_budget": expected_residual,
+            "did_inject_dummy_rooms": False,
+            **placement_meta,
+            "elapsed_s": elapsed_s,
+            "time_limit_s": float(self.config.time_limit),
+            "error": str(error or ""),
+        }
+        logger.info(
+            "[CONTRACT] Coverage debt fallback selected | floor=%s | island=%s | "
+            "fallback_mode=coverage_debt_treemap | plan_id=%s | actual_covered=%.2fm2 | "
+            "effective_min=%.2fm2 | expected_residual_budget=%.2fm2 | did_inject_dummy_rooms=False | "
+            "domain=%s | repacked_rooms=%s",
+            getattr(plan, "floor_id", ""),
+            getattr(plan, "island_id", ""),
+            getattr(plan, "plan_id", ""),
+            actual_covered,
+            effective_min,
+            expected_residual,
+            placement_meta.get("fallback_domain_source"),
+            placement_meta.get("repacked_rooms"),
+        )
+        logger.info(
+            "[TREEMAP] Core-aware fallback placement | floor=%s | island=%s | rooms=%d | "
+            "repacked=%d | rejected_core_overlap_candidates=%d | rejection_counts=%s",
+            getattr(plan, "floor_id", ""),
+            getattr(plan, "island_id", ""),
+            len(results),
+            len(placement_meta.get("repacked_rooms", []) or []),
+            int(placement_meta.get("rejected_core_overlap_candidates", 0) or 0),
+            placement_meta.get("rejection_counts", {}),
+        )
+        return results
+
+    def _fallback_solve(self) -> List[RoomResult]:
+        """降级到旧 solver（转换 RoomSpec）"""
+        old_specs = []
+        for r in self.rooms:
+            old_specs.append(RoomSpec(
+                room_id=r.room_id,
+                room_type=r.room_type,
+                target_area=r.target_area,
+                area_tolerance=self.config.area_tolerance,
+                min_width=r.min_width,
+                min_depth=r.min_depth,
+                adjacency_required=r.adjacency_required,
+                adjacency_forbidden=r.adjacency_forbidden,
+                window_access=r.needs_window,
+            ))
+        fallback = IslandPartitionSolver(
+            island_polygon=self.island,
+            rooms=old_specs,
+            time_limit=self.config.time_limit,
+        )
+        return fallback.solve()
+
+    # ----------------------------------------------------------
+    # Stage 2: 语义 CP-SAT 求解
+    # ----------------------------------------------------------
+
+    def _solve_cpsat(
+        self,
+        warm_start: List[WarmStartRect],
+        corridor_mode: str = "strict",
+        area_tolerance: Optional[float] = None,
+        aspect_relax_factor: float = 1.0,
+    ) -> Tuple[List[RoomResult], List[str]]:
+        try:
+            from ortools.sat.python import cp_model  # type: ignore[import-not-found]
+        except ImportError:
+            raise RuntimeError("ortools not installed. Run: pip install ortools")
+
+        SCALE = 100  # cm 精度
+        W_s = int(self.W * SCALE)
+        D_s = int(self.D * SCALE)
+
+        model = cp_model.CpModel()
+
+        # ═══════════════════════════════════════════════════════════
+        # 变量定义
+        # ═══════════════════════════════════════════════════════════
+
+        x = [model.NewIntVar(0, W_s, f"x_{i}") for i in range(self.n)]
+        y = [model.NewIntVar(0, D_s, f"y_{i}") for i in range(self.n)]
+        w = [
+            model.NewIntVar(
+                max(1, int(self.rooms[i].min_width * SCALE)), W_s, f"w_{i}"
+            )
+            for i in range(self.n)
+        ]
+        d = [
+            model.NewIntVar(
+                max(1, int(self.rooms[i].min_depth * SCALE)), D_s, f"d_{i}"
+            )
+            for i in range(self.n)
+        ]
+
+        # 辅助变量：右边界 / 上边界
+        x_end = [model.NewIntVar(0, W_s, f"xe_{i}") for i in range(self.n)]
+        y_end = [model.NewIntVar(0, D_s, f"ye_{i}") for i in range(self.n)]
+        for i in range(self.n):
+            model.Add(x_end[i] == x[i] + w[i])
+            model.Add(y_end[i] == y[i] + d[i])
+
+        # 面积变量
+        area = [model.NewIntVar(0, W_s * D_s, f"area_{i}") for i in range(self.n)]
+        for i in range(self.n):
+            model.AddMultiplicationEquality(area[i], w[i], d[i])
+
+        # ═══════════════════════════════════════════════════════════
+        # Warm Start Hints
+        # ═══════════════════════════════════════════════════════════
+
+        ws_dict = {ws.room_id: ws for ws in warm_start}
+        for i, room in enumerate(self.rooms):
+            if room.room_id in ws_dict:
+                ws = ws_dict[room.room_id]
+                model.AddHint(x[i], int((ws.x - self.x_min) * SCALE))
+                model.AddHint(y[i], int((ws.y - self.y_min) * SCALE))
+                model.AddHint(w[i], int(ws.width * SCALE))
+                model.AddHint(d[i], int(ws.depth * SCALE))
+
+        # ═══════════════════════════════════════════════════════════
+        # 硬约束
+        # ═══════════════════════════════════════════════════════════
+
+        # 约束 1: 边界
+        for i in range(self.n):
+            model.Add(x_end[i] <= W_s)
+            model.Add(y_end[i] <= D_s)
+
+        # 约束 2: 不重叠 (NoOverlap2D) + 禁区
+        x_intervals = [
+            model.NewIntervalVar(x[i], w[i], x_end[i], f"xi_{i}")
+            for i in range(self.n)
+        ]
+        y_intervals = [
+            model.NewIntervalVar(y[i], d[i], y_end[i], f"yi_{i}")
+            for i in range(self.n)
+        ]
+
+        # 禁区：bounding box 内但岛屿外的区域，作为不可移动的"房间"
+        forbidden_zones = self._get_forbidden_zones()
+        for fi, (fz_x, fz_y, fz_w, fz_d) in enumerate(forbidden_zones):
+            fz_x_s = int((fz_x - self.x_min) * SCALE)
+            fz_y_s = int((fz_y - self.y_min) * SCALE)
+            fz_w_s = max(1, int(fz_w * SCALE))
+            fz_d_s = max(1, int(fz_d * SCALE))
+            # 用固定域 IntVar 模拟常量
+            fx = model.NewIntVar(fz_x_s, fz_x_s, f"fz_x_{fi}")
+            fy = model.NewIntVar(fz_y_s, fz_y_s, f"fz_y_{fi}")
+            fw = model.NewIntVar(fz_w_s, fz_w_s, f"fz_w_{fi}")
+            fd = model.NewIntVar(fz_d_s, fz_d_s, f"fz_d_{fi}")
+            fxe = model.NewIntVar(fz_x_s + fz_w_s, fz_x_s + fz_w_s, f"fz_xe_{fi}")
+            fye = model.NewIntVar(fz_y_s + fz_d_s, fz_y_s + fz_d_s, f"fz_ye_{fi}")
+            x_intervals.append(model.NewIntervalVar(fx, fw, fxe, f"fzxi_{fi}"))
+            y_intervals.append(model.NewIntervalVar(fy, fd, fye, f"fzyi_{fi}"))
+            logger.info("Forbidden zone %d: (%.1f,%.1f) %.1fx%.1f",
+                        fi, fz_x, fz_y, fz_w, fz_d)
+
+        model.AddNoOverlap2D(x_intervals, y_intervals)
+
+        # 约束 3: 面积容差
+        tol = float(self.config.area_tolerance if area_tolerance is None else area_tolerance)
+        explicit_min_s = 0
+        explicit_max_s = 0
+        for i, room in enumerate(self.rooms):
+            target_s = int(room.target_area * SCALE * SCALE)
+            tol_i = tol
+            if getattr(room, "is_dummy", False):
+                tol_i = max(tol_i, float(getattr(self.config, "dummy_area_tolerance", tol_i)))
+            lb_s = int(target_s * (1 - tol_i))
+            ub_s = int(target_s * (1 + tol_i))
+            model.Add(area[i] >= lb_s)
+            model.Add(area[i] <= ub_s)
+            if not bool(getattr(room, "is_dummy", False)):
+                explicit_min_s += lb_s
+                explicit_max_s += ub_s
+
+        # 约束 3b: 总面积覆盖率
+        total_island_area_s = int(self.island.area * SCALE * SCALE)
+        total_target_s = sum(int(r.target_area * SCALE * SCALE) for r in self.rooms)
+        min_required = min(total_island_area_s, total_target_s)
+        is_rectangular = len(forbidden_zones) == 0
+        if is_rectangular:
+            min_coverage = max(
+                int(total_island_area_s * 0.985),
+                int(total_island_area_s - 0.75 * SCALE * SCALE),
+            )
+        else:
+            min_coverage = max(
+                int(total_island_area_s * 0.95),
+                int(total_island_area_s - 1.0 * SCALE * SCALE),
+            )
+        legacy_min_coverage = int(min_coverage)
+        if self.coverage_policy in {"coverage_debt", "grid_growth_loose", "loose_explicit"}:
+            # Stage 2A grid islands intentionally include transition/corridor sponge
+            # space. CP-SAT should place explicit rooms up to their elastic bounds;
+            # residual geometry is owned by Residual Sweep, not this rectangle packer.
+            plan = self.coverage_debt_plan
+            if plan is not None:
+                planned_min_s = int(max(0.0, float(getattr(plan, "effective_solver_coverage_min", 0.0))) * SCALE * SCALE)
+                min_coverage = min(int(total_island_area_s), max(0, planned_min_s))
+                logger.info(
+                    "[CONTRACT] Grid coverage debt adapted | floor=%s | island=%s | plan_id=%s | "
+                    "policy=%s | legacy_min=%.2fm2 | raw_min=%.2fm2 | effective_min=%.2fm2 | "
+                    "explicit_min=%.2fm2 | explicit_soft=%.2fm2 | explicit_max=%.2fm2 | "
+                    "solver_feasible_upper_bound=%.2fm2 | compact_filler_enabled=%s | "
+                    "compact_filler_max_sum=%.2fm2 | contract_reason=stage2a_coverage_debt",
+                    getattr(plan, "floor_id", ""),
+                    getattr(plan, "island_id", ""),
+                    getattr(plan, "plan_id", ""),
+                    self.coverage_policy,
+                    legacy_min_coverage / (SCALE * SCALE),
+                    float(getattr(plan, "raw_coverage_min", 0.0) or 0.0),
+                    min_coverage / (SCALE * SCALE),
+                    float(getattr(plan, "assigned_explicit_min_sum", 0.0) or 0.0),
+                    float(getattr(plan, "assigned_explicit_soft_sum", 0.0) or 0.0),
+                    float(getattr(plan, "assigned_explicit_max_sum", 0.0) or 0.0),
+                    float(getattr(plan, "solver_feasible_upper_bound", 0.0) or 0.0),
+                    bool((getattr(plan, "diagnostics", {}) or {}).get("compact_filler_enabled", False)),
+                    float((getattr(plan, "diagnostics", {}) or {}).get("compact_filler_max_sum", 0.0) or 0.0),
+                )
+            else:
+                explicit_cap_s = explicit_max_s if explicit_max_s > 0 else total_target_s
+                min_coverage = min(int(min_coverage), int(explicit_cap_s), int(total_island_area_s))
+                min_coverage = max(0, int(min_coverage))
+                logger.error(
+                    "[CONTRACT] Grid coverage debt missing plan | policy=%s | "
+                    "effective_min=%.2fm2 | legacy_min=%.2fm2 | island=%.2fm2 | "
+                    "explicit_min=%.2fm2 | explicit_max=%.2fm2 | target=%.2fm2",
+                    self.coverage_policy,
+                    min_coverage / (SCALE * SCALE),
+                    legacy_min_coverage / (SCALE * SCALE),
+                    total_island_area_s / (SCALE * SCALE),
+                    explicit_min_s / (SCALE * SCALE),
+                    explicit_max_s / (SCALE * SCALE),
+                    total_target_s / (SCALE * SCALE),
+                )
+        else:
+            logger.info(
+                "Mixed coverage hard constraint: rectangular=%s min=%.2fm2 island=%.2fm2 target=%.2fm2",
+                bool(is_rectangular),
+                min_coverage / (SCALE * SCALE),
+                total_island_area_s / (SCALE * SCALE),
+                total_target_s / (SCALE * SCALE),
+            )
+        min_coverage = max(0, min(int(total_island_area_s), int(min_coverage)))
+        model.Add(sum(area) >= min_coverage)
+        # 约束 4: 宽高比
+        for i, room in enumerate(self.rooms):
+            ar_min, ar_max = room.aspect_ratio_range
+            relax = max(1.0, float(aspect_relax_factor))
+            ar_min_eff = max(0.2, float(ar_min) / relax)
+            ar_max_eff = float(ar_max) * relax
+            # ar_min <= w/d <= ar_max  =>  ar_min * d <= w <= ar_max * d
+            ar_min_100 = int(ar_min_eff * 100)
+            ar_max_100 = int(ar_max_eff * 100)
+            model.Add(w[i] * 100 >= ar_min_100 * d[i])
+            model.Add(w[i] * 100 <= ar_max_100 * d[i])
+            if getattr(room, "is_dummy", False):
+                dummy_ar = max(1.0, float(getattr(self.config, "dummy_max_aspect_ratio", 4.0)))
+                dummy_ar_100 = int(dummy_ar * 100)
+                model.Add(w[i] * 100 <= dummy_ar_100 * d[i])
+                model.Add(d[i] * 100 <= dummy_ar_100 * w[i])
+
+        # 约束 5: 采光
+        for i, room in enumerate(self.rooms):
+            if room.needs_window:
+                self._add_window_constraint(model, i, x, y, x_end, y_end, W_s, D_s)
+
+        # 约束 6: 邻接必须（共享边）
+        # 非矩形岛屿时降级为软约束（在目标函数中由邻接距离项处理）
+        adj_req_processed: set = set()
+        if is_rectangular:
+            for room in self.rooms:
+                i = self.room_index[room.room_id]
+                for adj_id in room.adjacency_required:
+                    if adj_id not in self.room_index:
+                        continue
+                    j = self.room_index[adj_id]
+                    pair = tuple(sorted([i, j]))
+                    if pair in adj_req_processed:
+                        continue
+                    adj_req_processed.add(pair)
+                    self._add_adjacency_required_constraint(
+                        model, i, j, x, y, w, d, x_end, y_end, W_s, D_s, SCALE,
+                    )
+        else:
+            logger.info(
+                "Non-rectangular island: adjacency_required relaxed to soft objective"
+            )
+
+        # 约束 7: 禁止邻接
+        adj_forb_processed: set = set()
+        for room in self.rooms:
+            i = self.room_index[room.room_id]
+            for forbidden_id in room.adjacency_forbidden:
+                if forbidden_id not in self.room_index:
+                    continue
+                j = self.room_index[forbidden_id]
+                pair = tuple(sorted([i, j]))
+                if pair in adj_forb_processed:
+                    continue
+                adj_forb_processed.add(pair)
+                self._add_non_adjacency_constraint(
+                    model, i, j, x_end, y_end, x, y, SCALE,
+                )
+
+        # ═══════════════════════════════════════════════════════════
+        # 走廊可达性约束
+        # ═══════════════════════════════════════════════════════════
+        dropped_corridor_access_rooms: List[str] = []
+        if self.corridor_edges:
+            dropped_corridor_access_rooms = self._add_corridor_accessibility_constraints(
+                model, x, y, x_end, y_end, W_s, D_s,
+                mode=corridor_mode,
+            )
+
+        logger.info(
+            "Semantic CP-SAT model summary: rooms=%d, needs_window=%d, needs_corridor_access=%d, corridor_mode=%s, dropped_corridor_access=%d, forbidden_zones=%d, area_tolerance=%.2f, aspect_relax=%.2f, corridor_edges=%s",
+            self.n,
+            sum(1 for r in self.rooms if r.needs_window),
+            sum(1 for r in self.rooms if getattr(r, "needs_corridor_access", True)),
+            corridor_mode,
+            len(dropped_corridor_access_rooms),
+            len(forbidden_zones),
+            tol,
+            float(aspect_relax_factor),
+            self.corridor_edges,
+        )
+
+        # ═══════════════════════════════════════════════════════════
+        # 目标函数
+        # ═══════════════════════════════════════════════════════════
+
+        objectives = []
+
+        # 目标 1: 面积偏差
+        for i, room in enumerate(self.rooms):
+            target_s = int(room.target_area * SCALE * SCALE)
+            dev = model.NewIntVar(0, W_s * D_s, f"area_dev_{i}")
+            diff = model.NewIntVar(-W_s * D_s, W_s * D_s, f"area_diff_{i}")
+            model.Add(diff == area[i] - target_s)
+            model.AddAbsEquality(dev, diff)
+            weight = int(self.config.weight_area * room.area_priority)
+            objectives.append(dev * weight)
+
+        # 目标 2: 邻接距离
+        adjacency_terms = self._build_adjacency_objective(
+            model, x, y, w, d, W_s, D_s,
+        )
+        for term in adjacency_terms:
+            objectives.append(term * self.config.weight_adjacency)
+
+        # 目标 3: 分区紧凑度
+        compactness_terms = self._build_compactness_objective(
+            model, x, y, x_end, y_end, W_s, D_s,
+        )
+        for term in compactness_terms:
+            objectives.append(term * self.config.weight_compactness)
+
+        # 目标 4: 宽高比惩罚
+        for i, room in enumerate(self.rooms):
+            if room.room_type in ("corridor", "hallway", "passage"):
+                continue
+            if getattr(room, "is_dummy", False):
+                continue
+            ar_pen = model.NewIntVar(0, max(W_s, D_s), f"ar_pen_{i}")
+            ar_diff = model.NewIntVar(-max(W_s, D_s), max(W_s, D_s), f"ar_diff_{i}")
+            model.Add(ar_diff == w[i] - d[i])
+            model.AddAbsEquality(ar_pen, ar_diff)
+            objectives.append(ar_pen * self.config.weight_aspect_ratio)
+
+        # Dummy must be pushed to the building edge and may not monopolize facade.
+        max_facade_len = getattr(self.config, "dummy_dynamic_facade_shared_length", None)
+        if max_facade_len is None:
+            max_facade_len = getattr(self.config, "dummy_max_facade_shared_length", 3.0)
+        max_facade_len_s = max(1, int(float(max_facade_len) * SCALE))
+        for i, room in enumerate(self.rooms):
+            if not getattr(room, "is_dummy", False):
+                continue
+            touches = []
+            if "west" in self.context.exterior_walls:
+                t = model.NewBoolVar(f"dummy_touch_west_{i}")
+                model.Add(x[i] == 0).OnlyEnforceIf(t)
+                model.Add(x[i] > 0).OnlyEnforceIf(t.Not())
+                model.Add(d[i] <= max_facade_len_s).OnlyEnforceIf(t)
+                touches.append(t)
+            if "east" in self.context.exterior_walls:
+                t = model.NewBoolVar(f"dummy_touch_east_{i}")
+                model.Add(x_end[i] == W_s).OnlyEnforceIf(t)
+                model.Add(x_end[i] < W_s).OnlyEnforceIf(t.Not())
+                model.Add(d[i] <= max_facade_len_s).OnlyEnforceIf(t)
+                touches.append(t)
+            if "south" in self.context.exterior_walls:
+                t = model.NewBoolVar(f"dummy_touch_south_{i}")
+                model.Add(y[i] == 0).OnlyEnforceIf(t)
+                model.Add(y[i] > 0).OnlyEnforceIf(t.Not())
+                model.Add(w[i] <= max_facade_len_s).OnlyEnforceIf(t)
+                touches.append(t)
+            if "north" in self.context.exterior_walls:
+                t = model.NewBoolVar(f"dummy_touch_north_{i}")
+                model.Add(y_end[i] == D_s).OnlyEnforceIf(t)
+                model.Add(y_end[i] < D_s).OnlyEnforceIf(t.Not())
+                model.Add(w[i] <= max_facade_len_s).OnlyEnforceIf(t)
+                touches.append(t)
+            if touches:
+                any_touch = model.NewBoolVar(f"dummy_touch_any_{i}")
+                model.AddMaxEquality(any_touch, touches)
+                model.Add(any_touch >= 1)
+
+        real_corridor_reward = int(getattr(self.config, "real_corridor_reward", 0) or 0)
+        dummy_corridor_penalty = int(getattr(self.config, "dummy_corridor_penalty", 0) or 0)
+        if self.corridor_edges and (real_corridor_reward != 0 or dummy_corridor_penalty != 0):
+            TOUCH_THRESHOLD = 10
+            for i, room in enumerate(self.rooms):
+                is_dummy = bool(getattr(room, "is_dummy", False))
+                needs_access = bool(getattr(room, "needs_corridor_access", True))
+                rtype = (room.room_type or "").lower()
+                if rtype in ("corridor", "hallway", "passage"):
+                    continue
+                touches = []
+                if "south" in self.corridor_edges:
+                    t = model.NewBoolVar(f"obj_touch_south_{i}")
+                    model.Add(y[i] <= TOUCH_THRESHOLD).OnlyEnforceIf(t)
+                    model.Add(y[i] > TOUCH_THRESHOLD).OnlyEnforceIf(t.Not())
+                    touches.append(t)
+                if "north" in self.corridor_edges:
+                    t = model.NewBoolVar(f"obj_touch_north_{i}")
+                    model.Add(y_end[i] >= D_s - TOUCH_THRESHOLD).OnlyEnforceIf(t)
+                    model.Add(y_end[i] < D_s - TOUCH_THRESHOLD).OnlyEnforceIf(t.Not())
+                    touches.append(t)
+                if "west" in self.corridor_edges:
+                    t = model.NewBoolVar(f"obj_touch_west_{i}")
+                    model.Add(x[i] <= TOUCH_THRESHOLD).OnlyEnforceIf(t)
+                    model.Add(x[i] > TOUCH_THRESHOLD).OnlyEnforceIf(t.Not())
+                    touches.append(t)
+                if "east" in self.corridor_edges:
+                    t = model.NewBoolVar(f"obj_touch_east_{i}")
+                    model.Add(x_end[i] >= W_s - TOUCH_THRESHOLD).OnlyEnforceIf(t)
+                    model.Add(x_end[i] < W_s - TOUCH_THRESHOLD).OnlyEnforceIf(t.Not())
+                    touches.append(t)
+                if not touches:
+                    continue
+                any_touch = model.NewBoolVar(f"obj_touch_any_{i}")
+                model.AddMaxEquality(any_touch, touches)
+                if (not is_dummy) and needs_access and real_corridor_reward > 0:
+                    objectives.append(any_touch * (-real_corridor_reward))
+                if is_dummy and dummy_corridor_penalty > 0:
+                    objectives.append(any_touch * dummy_corridor_penalty)
+
+        # 目标 5: 覆盖率（非矩形岛屿时作为软目标，最大化总面积）
+        if not is_rectangular:
+            coverage_gap = model.NewIntVar(0, W_s * D_s, "coverage_gap")
+            coverage_diff = model.NewIntVar(-W_s * D_s, W_s * D_s, "cov_diff")
+            model.Add(coverage_diff == total_island_area_s - sum(area))
+            model.AddMaxEquality(coverage_gap, [coverage_diff, model.NewConstant(0)])
+            objectives.append(coverage_gap * self.config.weight_area)
+
+        # 总目标
+        model.Minimize(sum(objectives))
+
+        # ═══════════════════════════════════════════════════════════
+        # 求解
+        # ═══════════════════════════════════════════════════════════
+
+        solver = cp_model.CpSolver()
+        solver.parameters.max_time_in_seconds = self.config.time_limit
+        solver.parameters.num_search_workers = self.config.num_workers
+        solver.parameters.log_search_progress = True
+        try:
+            solver.log_callback = lambda msg: logger.debug("[CP-SAT] %s", str(msg).rstrip())
+        except Exception:
+            pass
+
+        status = solver.Solve(model)
+        status_name = solver.StatusName(status)
+        self._last_cpsat_metadata = {
+            "status_name": str(status_name),
+            "time_limit_s": float(self.config.time_limit),
+            "coverage_policy": str(self.coverage_policy),
+            **self._core_context_metadata(),
+            "core_forbidden": dict(self._last_core_forbidden_metadata),
+            "min_coverage_area": float(min_coverage) / (SCALE * SCALE),
+            "legacy_min_coverage_area": float(legacy_min_coverage) / (SCALE * SCALE),
+            "explicit_min_area": float(explicit_min_s) / (SCALE * SCALE),
+            "explicit_max_area": float(explicit_max_s) / (SCALE * SCALE),
+            "coverage_debt_plan": (
+                self.coverage_debt_plan.to_dict()
+                if hasattr(self.coverage_debt_plan, "to_dict")
+                else None
+            ),
+            "objective_value": float(solver.ObjectiveValue()) if status in [cp_model.OPTIMAL, cp_model.FEASIBLE] else None,
+            "best_objective_bound": float(solver.BestObjectiveBound()) if status in [cp_model.OPTIMAL, cp_model.FEASIBLE] else None,
+        }
+
+        if status not in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
+            raise SemanticSolveError(
+                (
+                    f"Semantic MIQP solve failed, status: {status_name}. "
+                    f"Try relaxing constraints or increasing time_limit."
+                ),
+                status_code=int(status),
+                status_name=str(status_name),
+            )
+
+        # 提取结果
+        results = []
+        for i, room in enumerate(self.rooms):
+            results.append(RoomResult(
+                room_id=room.room_id,
+                x=solver.Value(x[i]) / SCALE + self.x_min,
+                y=solver.Value(y[i]) / SCALE + self.y_min,
+                width=solver.Value(w[i]) / SCALE,
+                depth=solver.Value(d[i]) / SCALE,
+            ))
+
+        return results, dropped_corridor_access_rooms
+
+    # ----------------------------------------------------------
+    # 约束辅助方法
+    # ----------------------------------------------------------
+
+    def _add_window_constraint(
+        self, model, i: int,
+        x, y, x_end, y_end,
+        W_s: int, D_s: int,
+    ):
+        """采光约束：needs_window 的房间至少一边靠外墙"""
+        touches = []
+
+        if "west" in self.context.exterior_walls:
+            t = model.NewBoolVar(f"touch_west_{i}")
+            model.Add(x[i] == 0).OnlyEnforceIf(t)
+            model.Add(x[i] > 0).OnlyEnforceIf(t.Not())
+            touches.append(t)
+
+        if "east" in self.context.exterior_walls:
+            t = model.NewBoolVar(f"touch_east_{i}")
+            model.Add(x_end[i] == W_s).OnlyEnforceIf(t)
+            model.Add(x_end[i] < W_s).OnlyEnforceIf(t.Not())
+            touches.append(t)
+
+        if "south" in self.context.exterior_walls:
+            t = model.NewBoolVar(f"touch_south_{i}")
+            model.Add(y[i] == 0).OnlyEnforceIf(t)
+            model.Add(y[i] > 0).OnlyEnforceIf(t.Not())
+            touches.append(t)
+
+        if "north" in self.context.exterior_walls:
+            t = model.NewBoolVar(f"touch_north_{i}")
+            model.Add(y_end[i] == D_s).OnlyEnforceIf(t)
+            model.Add(y_end[i] < D_s).OnlyEnforceIf(t.Not())
+            touches.append(t)
+
+        if touches:
+            model.Add(sum(touches) >= 1)
+
+    def _add_adjacency_required_constraint(
+        self, model, i: int, j: int,
+        x, y, w, d, x_end, y_end,
+        W_s: int, D_s: int, SCALE: int,
+    ):
+        """
+        邻接必须约束：两个房间必须共享一段边（>= min_door_width）。
+
+        4 个方向选 1：i 的右边 = j 的左边（或反之），
+        且在正交方向有 >= MIN_DOOR_S 的重叠段。
+        """
+        MIN_DOOR_S = max(1, int(self.config.min_door_width * SCALE))
+
+        touch_L = model.NewBoolVar(f"touch_{i}_{j}_L")
+        touch_R = model.NewBoolVar(f"touch_{i}_{j}_R")
+        touch_F = model.NewBoolVar(f"touch_{i}_{j}_F")
+        touch_B = model.NewBoolVar(f"touch_{i}_{j}_B")
+
+        # --- 方向 L: i 的右边 = j 的左边, y 方向重叠 ---
+        model.Add(x_end[i] == x[j]).OnlyEnforceIf(touch_L)
+        # y overlap: min(y_end[i], y_end[j]) - max(y[i], y[j]) >= MIN_DOOR_S
+        ov_y_min_L = model.NewIntVar(0, D_s, f"ov_ymin_L_{i}_{j}")
+        ov_y_max_L = model.NewIntVar(0, D_s, f"ov_ymax_L_{i}_{j}")
+        model.AddMinEquality(ov_y_min_L, [y_end[i], y_end[j]])
+        model.AddMaxEquality(ov_y_max_L, [y[i], y[j]])
+        model.Add(ov_y_min_L - ov_y_max_L >= MIN_DOOR_S).OnlyEnforceIf(touch_L)
+
+        # --- 方向 R: j 的右边 = i 的左边 ---
+        model.Add(x_end[j] == x[i]).OnlyEnforceIf(touch_R)
+        ov_y_min_R = model.NewIntVar(0, D_s, f"ov_ymin_R_{i}_{j}")
+        ov_y_max_R = model.NewIntVar(0, D_s, f"ov_ymax_R_{i}_{j}")
+        model.AddMinEquality(ov_y_min_R, [y_end[i], y_end[j]])
+        model.AddMaxEquality(ov_y_max_R, [y[i], y[j]])
+        model.Add(ov_y_min_R - ov_y_max_R >= MIN_DOOR_S).OnlyEnforceIf(touch_R)
+
+        # --- 方向 F: i 的上边 = j 的下边 ---
+        model.Add(y_end[i] == y[j]).OnlyEnforceIf(touch_F)
+        ov_x_min_F = model.NewIntVar(0, W_s, f"ov_xmin_F_{i}_{j}")
+        ov_x_max_F = model.NewIntVar(0, W_s, f"ov_xmax_F_{i}_{j}")
+        model.AddMinEquality(ov_x_min_F, [x_end[i], x_end[j]])
+        model.AddMaxEquality(ov_x_max_F, [x[i], x[j]])
+        model.Add(ov_x_min_F - ov_x_max_F >= MIN_DOOR_S).OnlyEnforceIf(touch_F)
+
+        # --- 方向 B: j 的上边 = i 的下边 ---
+        model.Add(y_end[j] == y[i]).OnlyEnforceIf(touch_B)
+        ov_x_min_B = model.NewIntVar(0, W_s, f"ov_xmin_B_{i}_{j}")
+        ov_x_max_B = model.NewIntVar(0, W_s, f"ov_xmax_B_{i}_{j}")
+        model.AddMinEquality(ov_x_min_B, [x_end[i], x_end[j]])
+        model.AddMaxEquality(ov_x_max_B, [x[i], x[j]])
+        model.Add(ov_x_min_B - ov_x_max_B >= MIN_DOOR_S).OnlyEnforceIf(touch_B)
+
+        # 至少一个方向成立
+        model.Add(touch_L + touch_R + touch_F + touch_B >= 1)
+
+    def _add_non_adjacency_constraint(
+        self, model, i: int, j: int,
+        x_end, y_end, x, y, SCALE: int,
+    ):
+        """禁止邻接：两个房间必须有间隙（不能共享边）"""
+        MIN_GAP_S = max(1, int(self.config.non_adjacency_min_gap * SCALE))
+
+        sep_L = model.NewBoolVar(f"sep_{i}_{j}_L")
+        sep_R = model.NewBoolVar(f"sep_{i}_{j}_R")
+        sep_F = model.NewBoolVar(f"sep_{i}_{j}_F")
+        sep_B = model.NewBoolVar(f"sep_{i}_{j}_B")
+
+        model.Add(x_end[i] + MIN_GAP_S <= x[j]).OnlyEnforceIf(sep_L)
+        model.Add(x_end[j] + MIN_GAP_S <= x[i]).OnlyEnforceIf(sep_R)
+        model.Add(y_end[i] + MIN_GAP_S <= y[j]).OnlyEnforceIf(sep_F)
+        model.Add(y_end[j] + MIN_GAP_S <= y[i]).OnlyEnforceIf(sep_B)
+
+        model.Add(sep_L + sep_R + sep_F + sep_B >= 1)
+
+    def _is_strong_corridor_dependency(self, room: SemanticRoomSpec) -> bool:
+        """强依赖定义：交通空间或显式强邻接需求。"""
+        rtype = (room.room_type or "").lower()
+        if rtype in ("corridor", "hallway", "passage", "entrance", "lobby"):
+            return True
+        if room.zone == ZoneType.CIRCULATION:
+            return True
+        return len(room.adjacency_required) > 0
+
+    def _add_corridor_accessibility_constraints(
+        self, model, x, y, x_end, y_end, W_s: int, D_s: int, mode: str = "strict",
+    ) -> List[str]:
+        """
+        走廊可达性约束：每个房间至少有一条边接触走廊侧
+
+        如果岛屿无走廊边（内岛），跳过约束。
+        """
+        if not self.corridor_edges:
+            logger.warning(
+                "Island has no corridor edges, skipping accessibility constraint. "
+                "Rooms may not be directly accessible."
+            )
+            return []
+
+        TOUCH_THRESHOLD = 10  # 10cm = 可开门宽度（SCALE=100 时 10 个单位）
+        dropped_rooms: List[str] = []
+
+        for i, room in enumerate(self.rooms):
+            needs_access = bool(getattr(room, "needs_corridor_access", True))
+            if not needs_access:
+                dropped_rooms.append(room.room_id)
+                continue
+            if mode == "strong_only" and (not self._is_strong_corridor_dependency(room)):
+                dropped_rooms.append(room.room_id)
+                continue
+            if mode == "soft":
+                continue
+
+            touches_any_corridor = []
+
+            if "south" in self.corridor_edges:
+                touch_south = model.NewBoolVar(f"touch_south_{i}")
+                model.Add(y[i] <= TOUCH_THRESHOLD).OnlyEnforceIf(touch_south)
+                model.Add(y[i] > TOUCH_THRESHOLD).OnlyEnforceIf(touch_south.Not())
+                touches_any_corridor.append(touch_south)
+
+            if "north" in self.corridor_edges:
+                touch_north = model.NewBoolVar(f"touch_north_{i}")
+                model.Add(y_end[i] >= D_s - TOUCH_THRESHOLD).OnlyEnforceIf(touch_north)
+                model.Add(y_end[i] < D_s - TOUCH_THRESHOLD).OnlyEnforceIf(touch_north.Not())
+                touches_any_corridor.append(touch_north)
+
+            if "west" in self.corridor_edges:
+                touch_west = model.NewBoolVar(f"touch_west_{i}")
+                model.Add(x[i] <= TOUCH_THRESHOLD).OnlyEnforceIf(touch_west)
+                model.Add(x[i] > TOUCH_THRESHOLD).OnlyEnforceIf(touch_west.Not())
+                touches_any_corridor.append(touch_west)
+
+            if "east" in self.corridor_edges:
+                touch_east = model.NewBoolVar(f"touch_east_{i}")
+                model.Add(x_end[i] >= W_s - TOUCH_THRESHOLD).OnlyEnforceIf(touch_east)
+                model.Add(x_end[i] < W_s - TOUCH_THRESHOLD).OnlyEnforceIf(touch_east.Not())
+                touches_any_corridor.append(touch_east)
+
+            # 至少接触一个走廊边
+            if touches_any_corridor:
+                model.Add(sum(touches_any_corridor) >= 1)
+        return dropped_rooms
+
+    # ----------------------------------------------------------
+    # 目标函数辅助方法
+    # ----------------------------------------------------------
+
+    def _build_adjacency_objective(
+        self, model, x, y, w, d, W_s: int, D_s: int,
+    ) -> list:
+        """邻接距离目标：最小化必须/偏好相邻房间的质心距离"""
+        terms = []
+        processed: set = set()
+
+        for room in self.rooms:
+            i = self.room_index[room.room_id]
+
+            # adjacency_required（全权重）
+            for adj_id in room.adjacency_required:
+                if adj_id not in self.room_index:
+                    continue
+                j = self.room_index[adj_id]
+                pair = tuple(sorted([i, j]))
+                if pair in processed:
+                    continue
+                processed.add(pair)
+                dist = self._centroid_manhattan_distance(
+                    model, i, j, x, y, w, d, W_s, D_s, f"adj_req_{i}_{j}",
+                )
+                terms.append(dist)
+
+            # adjacency_preferred（半权重）
+            for adj_id in room.adjacency_preferred:
+                if adj_id not in self.room_index:
+                    continue
+                j = self.room_index[adj_id]
+                pair = tuple(sorted([i, j]))
+                if pair in processed:
+                    continue
+                processed.add(pair)
+                dist = self._centroid_manhattan_distance(
+                    model, i, j, x, y, w, d, W_s, D_s, f"adj_pref_{i}_{j}",
+                )
+                # 半权重：整除 2
+                half = model.NewIntVar(0, 2 * (W_s + D_s), f"adj_pref_half_{i}_{j}")
+                model.AddDivisionEquality(half, dist, 2)
+                terms.append(half)
+
+        return terms
+
+    def _centroid_manhattan_distance(
+        self, model, i: int, j: int,
+        x, y, w, d,
+        W_s: int, D_s: int,
+        prefix: str,
+    ):
+        """两个房间质心的曼哈顿距离（使用 2 倍值避免除法）"""
+        # centroid * 2
+        cx_i_2 = model.NewIntVar(0, 2 * W_s, f"{prefix}_cx2_i")
+        cy_i_2 = model.NewIntVar(0, 2 * D_s, f"{prefix}_cy2_i")
+        cx_j_2 = model.NewIntVar(0, 2 * W_s, f"{prefix}_cx2_j")
+        cy_j_2 = model.NewIntVar(0, 2 * D_s, f"{prefix}_cy2_j")
+
+        model.Add(cx_i_2 == 2 * x[i] + w[i])
+        model.Add(cy_i_2 == 2 * y[i] + d[i])
+        model.Add(cx_j_2 == 2 * x[j] + w[j])
+        model.Add(cy_j_2 == 2 * y[j] + d[j])
+
+        # |dx| + |dy|
+        dx_raw = model.NewIntVar(-2 * W_s, 2 * W_s, f"{prefix}_dx_raw")
+        dy_raw = model.NewIntVar(-2 * D_s, 2 * D_s, f"{prefix}_dy_raw")
+        dx = model.NewIntVar(0, 2 * W_s, f"{prefix}_dx")
+        dy = model.NewIntVar(0, 2 * D_s, f"{prefix}_dy")
+
+        model.Add(dx_raw == cx_i_2 - cx_j_2)
+        model.Add(dy_raw == cy_i_2 - cy_j_2)
+        model.AddAbsEquality(dx, dx_raw)
+        model.AddAbsEquality(dy, dy_raw)
+
+        dist = model.NewIntVar(0, 2 * (W_s + D_s), f"{prefix}_dist")
+        model.Add(dist == dx + dy)
+
+        return dist
+
+    def _build_compactness_objective(
+        self, model, x, y, x_end, y_end, W_s: int, D_s: int,
+    ) -> list:
+        """分区紧凑度：最小化每个功能分区的包围盒周长"""
+        terms = []
+
+        for zone, room_ids in self.zones.items():
+            if len(room_ids) < 2:
+                continue
+
+            indices = [self.room_index[rid] for rid in room_ids
+                       if rid in self.room_index]
+            if len(indices) < 2:
+                continue
+
+            zone_name = zone.value
+
+            # 包围盒边界（用 AddMinEquality/AddMaxEquality 正确计算）
+            z_x_min = model.NewIntVar(0, W_s, f"zone_{zone_name}_xmin")
+            z_x_max = model.NewIntVar(0, W_s, f"zone_{zone_name}_xmax")
+            z_y_min = model.NewIntVar(0, D_s, f"zone_{zone_name}_ymin")
+            z_y_max = model.NewIntVar(0, D_s, f"zone_{zone_name}_ymax")
+
+            model.AddMinEquality(z_x_min, [x[idx] for idx in indices])
+            model.AddMaxEquality(z_x_max, [x_end[idx] for idx in indices])
+            model.AddMinEquality(z_y_min, [y[idx] for idx in indices])
+            model.AddMaxEquality(z_y_max, [y_end[idx] for idx in indices])
+
+            # 包围盒宽高
+            z_w = model.NewIntVar(0, W_s, f"zone_{zone_name}_w")
+            z_h = model.NewIntVar(0, D_s, f"zone_{zone_name}_h")
+            model.Add(z_w == z_x_max - z_x_min)
+            model.Add(z_h == z_y_max - z_y_min)
+
+            # 周长
+            z_perim = model.NewIntVar(0, 2 * (W_s + D_s), f"zone_{zone_name}_perim")
+            model.Add(z_perim == 2 * (z_w + z_h))
+
+            terms.append(z_perim)
+
+        return terms
+
+    # ----------------------------------------------------------
+    # Stage 3: 边界裁剪（复用旧 solver 逻辑）
+    # ----------------------------------------------------------
+
+    def _clip_to_boundary(self, results: List[RoomResult]) -> List[RoomResult]:
+        clipped = []
+        for room in results:
+            # 如果房间完全在岛屿内部，保留原样
+            if self.island.contains(room.polygon):
+                clipped.append(room)
+                continue
+
+            clipped_geom = room.polygon.intersection(self.island)
+            if clipped_geom.is_empty or clipped_geom.area < 0.5:
+                logger.warning("Room %s clipped to empty, removing", room.room_id)
+                continue
+
+            # 裁剪后如果仍是矩形（面积误差 < 1%），用精确 bounds
+            minx, miny, maxx, maxy = clipped_geom.bounds
+            bounds_area = (maxx - minx) * (maxy - miny)
+            if bounds_area > 0 and abs(clipped_geom.area - bounds_area) / bounds_area < 0.01:
+                clipped.append(RoomResult(
+                    room_id=room.room_id,
+                    x=minx, y=miny,
+                    width=maxx - minx, depth=maxy - miny,
+                ))
+            else:
+                if self.coverage_policy in {"coverage_debt", "grid_growth_loose", "loose_explicit"}:
+                    self._raise_core_solver_invariant(
+                        stage="core_generation_invariant_failed",
+                        message=(
+                            "coverage_debt solver produced non-rectangular boundary clip; "
+                            f"RoomResult cannot safely represent room={room.room_id}"
+                        ),
+                        metadata={
+                            "source": "clip_to_boundary",
+                            "room_id": str(room.room_id),
+                            "clipped_area": float(getattr(clipped_geom, "area", 0.0) or 0.0),
+                            "clipped_bounds_area": float(bounds_area),
+                            "reason": "non_rectangular_clip_rejected_under_coverage_debt",
+                        },
+                    )
+                # 非矩形裁剪结果 — 取岛屿内的最大内接矩形近似
+                # 保守做法：收缩到裁剪区域的实际面积对应的矩形
+                w = maxx - minx
+                h = maxy - miny
+                if w > 0 and h > 0:
+                    ratio = clipped_geom.area / bounds_area
+                    # 按比例缩小较长边
+                    if w >= h:
+                        w *= ratio
+                    else:
+                        h *= ratio
+                    cx, cy = clipped_geom.centroid.x, clipped_geom.centroid.y
+                    new_x = max(minx, cx - w / 2)
+                    new_y = max(miny, cy - h / 2)
+                    clipped.append(RoomResult(
+                        room_id=room.room_id,
+                        x=new_x, y=new_y,
+                        width=w, depth=h,
+                    ))
+                else:
+                    clipped.append(RoomResult(
+                        room_id=room.room_id,
+                        x=minx, y=miny,
+                        width=max(w, 0.1), depth=max(h, 0.1),
+                    ))
+        return clipped
+
+
+# ============================================================
+# 语义求解便捷函数
+# ============================================================
+
+
+def partition_island_semantic(
+    island_polygon: Polygon,
+    rooms: List[SemanticRoomSpec],
+    adjacency_graph: Dict[str, List[str]],
+    exterior_walls: List[str],
+    config: Optional[SolverConfig] = None,
+    corridor_edges: Optional[List[str]] = None,
+    coverage_policy: str = "legacy",
+    coverage_debt_plan: Optional[Any] = None,
+    core_contract: Optional[CoreFootprintContract] = None,
+) -> List[RoomResult]:
+    """
+    语义感知的岛屿房间划分便捷函数。
+
+    Args:
+        island_polygon: 岛屿边界
+        rooms: 语义增强版房间规格列表
+        adjacency_graph: 邻接关系图 {room_id: [neighbor_ids]}
+        exterior_walls: 外墙方向列表 ['north', 'south', 'east', 'west']
+        config: 求解器配置
+        corridor_edges: 走廊接触边列表（用于可达性约束）
+
+    Returns:
+        房间划分结果列表
+    """
+    results, _metadata = partition_island_semantic_with_metadata(
+        island_polygon=island_polygon,
+        rooms=rooms,
+        adjacency_graph=adjacency_graph,
+        exterior_walls=exterior_walls,
+        config=config,
+        corridor_edges=corridor_edges,
+        coverage_policy=coverage_policy,
+        coverage_debt_plan=coverage_debt_plan,
+        core_contract=core_contract,
+    )
+    return results
+
+
+def partition_island_semantic_with_metadata(
+    island_polygon: Polygon,
+    rooms: List[SemanticRoomSpec],
+    adjacency_graph: Dict[str, List[str]],
+    exterior_walls: List[str],
+    config: Optional[SolverConfig] = None,
+    corridor_edges: Optional[List[str]] = None,
+    coverage_policy: str = "legacy",
+    coverage_debt_plan: Optional[Any] = None,
+    core_contract: Optional[CoreFootprintContract] = None,
+) -> Tuple[List[RoomResult], Dict[str, Any]]:
+    """Semantic partition helper that preserves solver status metadata."""
+    context = IslandContext(
+        exterior_walls=exterior_walls,
+        corridor_edges=corridor_edges or [],
+    )
+    solver = SemanticIslandPartitionSolver(
+        island_polygon=island_polygon,
+        rooms=rooms,
+        adjacency_graph=adjacency_graph,
+        island_context=context,
+        config=config,
+        coverage_policy=coverage_policy,
+        coverage_debt_plan=coverage_debt_plan,
+        core_contract=core_contract,
+    )
+    results = solver.solve()
+    return results, dict(solver.last_solver_metadata)

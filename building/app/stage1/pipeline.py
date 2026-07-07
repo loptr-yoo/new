@@ -6,7 +6,7 @@ import math
 import uuid
 from typing import Any, Optional
 
-from shapely.geometry import Polygon
+from shapely.geometry import Polygon, box
 
 from ..models import BuildingAllocation, FloorAllocation, RoomAllocation
 from ..pipeline_defaults import DEFAULT_CORRIDOR_LAYOUT, DEFAULT_SCENE_TYPE
@@ -423,8 +423,10 @@ def run_stage1_from_allocation(
     source: str = "mock",
     run_id: Optional[str] = None,
     core_placement: str = "auto",
+    width: Optional[float] = None,
+    depth: Optional[float] = None,
 ) -> Stage1Result:
-    raw = allocation_to_raw_program(allocation, source=source)
+    raw = allocation_to_raw_program(allocation, source=source, width=width, depth=depth)
     return run_stage1_from_raw(raw, source=source, run_id=run_id, core_placement=core_placement)
 
 
@@ -483,11 +485,39 @@ def core_tube_from_stage1_policy(
             "Stage 1 core policy has no resolved bbox and resolved core geometry is required",
             {"stage1_core_policy_id": ctx.stage1_core_policy_id},
         )
-    core = CoreTube.create_for_floor(
-        floor_bounds=floor_boundary.bounds,
-        area_ratio=max(0.001, float(ctx.core_area) / max(float(floor_boundary.area), 1e-6)),
-        position=str(ctx.selected_placement or "east"),
-    )
+    if ctx.bbox is not None:
+        x = float(ctx.bbox["x"])
+        y = float(ctx.bbox["y"])
+        width = float(ctx.bbox["width"])
+        depth = float(ctx.bbox["depth"])
+        poly = box(x, y, x + width, y + depth)
+        if not floor_boundary.buffer(1e-7).covers(poly):
+            raise Stage1ContextMismatchError(
+                "core_context_mismatch",
+                "Stage 1 core bbox is outside the resolved envelope",
+                {
+                    "stage1_core_policy_id": ctx.stage1_core_policy_id,
+                    "bbox": ctx.bbox,
+                    "floor_bounds": tuple(float(v) for v in floor_boundary.bounds),
+                },
+            )
+        core = CoreTube(
+            polygon=poly,
+            center=(float(x + width / 2.0), float(y + depth / 2.0)),
+            width=width,
+            depth=depth,
+        )
+        core.build_subzones_from_bounds()
+    else:
+        core = CoreTube.create_for_floor(
+            floor_bounds=floor_boundary.bounds,
+            area_ratio=max(0.001, float(ctx.core_area) / max(float(floor_boundary.area), 1e-6)),
+            position=str(ctx.selected_placement or "east"),
+        )
+    setattr(core, "core_source", "stage1")
+    setattr(core, "stage1_core_policy_id", ctx.stage1_core_policy_id)
+    setattr(core, "stage1_selected_placement", ctx.selected_placement)
+    setattr(core, "stage1_core_area", float(ctx.core_area))
     metadata = {
         "core_source": "stage1",
         "stage1_core_policy_id": ctx.stage1_core_policy_id,
@@ -496,6 +526,7 @@ def core_tube_from_stage1_policy(
         "core_area": ctx.core_area,
         "floor_count": ctx.floor_count,
         "bbox": ctx.bbox,
+        "resolved": ctx.bbox is not None,
     }
     return core, metadata
 
@@ -508,6 +539,7 @@ def validate_stage1_core_context(result: Stage1Result, metadata: dict[str, Any])
         "selected_placement": metadata.get("selected_placement") == ctx.selected_placement,
         "floor_count": int(metadata.get("floor_count", -1)) == int(ctx.floor_count),
         "core_area": abs(float(metadata.get("core_area", -1.0)) - float(ctx.core_area)) <= 1e-6,
+        "bbox": metadata.get("bbox") == ctx.bbox,
     }
     if not all(checks.values()):
         raise Stage1ContextMismatchError("core_context_mismatch", "Stage 1 core context mismatch", checks)

@@ -24,6 +24,11 @@ from ..geometry.exceptions import (
     LayoutTopologyError,
     SemanticInvalidError,
 )
+from ..geometry.floor_free_space import (
+    FloorFreeSpace,
+    build_floor_free_spaces_for_allocation,
+    build_stage2a_report,
+)
 from ..geometry.room_spec import SolverConfig
 from ..geometry.serializers import building_result_to_dict, core_tube_to_dict, serialize_single_floor
 from ..geometry.topology_generator import CoreTube
@@ -97,6 +102,27 @@ def _derive_floor_boundary(
     return float(width), float(height), box(0.0, 0.0, float(width), float(height))
 
 
+def _resolved_dimensions_for_allocation(
+    allocation: BuildingAllocation,
+    options: BuildingPipelineOptions,
+) -> Tuple[float, float]:
+    envelope = BuildingEnvelopeBase.model_validate({
+        "building_name": allocation.building_name,
+        "total_floors": allocation.total_floors,
+        "overall_total_area": allocation.overall_total_area,
+        "floors": [
+            {
+                "floor_number": floor.floor_number,
+                "floor_function_tag": floor.floor_function_tag,
+                "requested_rooms_list": [room.room_name for room in floor.rooms],
+            }
+            for floor in allocation.floors
+        ],
+    })
+    width, height, _ = _derive_floor_boundary(envelope, options)
+    return width, height
+
+
 def _pick_corridor_width_and_core_ratio(floor_area: float) -> Tuple[float, float]:
     if floor_area < 80:
         return 1.5, 0.08
@@ -161,10 +187,13 @@ class BuildingPipelineService:
             else:
                 semantic_result = await self.generate_semantics_only(request, opts)
                 allocation = semantic_result.allocation
+        width, depth = _resolved_dimensions_for_allocation(allocation, opts)
         return run_stage1_from_allocation(
             allocation,
             source="mock" if source == "mock" else ("fixture" if source == "fixture" else "llm"),
             core_placement=str(opts.core_placement or DEFAULT_CORE_PLACEMENT),
+            width=width,
+            depth=depth,
         )
 
     def _mock_stage1_allocation(self, request: GenerateSemanticsRequest) -> BuildingAllocation:
@@ -359,9 +388,22 @@ class BuildingPipelineService:
                     float(opts.corridor_width if opts.corridor_width is not None else corridor_options["target_width"]),
                     corridor_layout,
                 )
-                fixed_core_tube, core_metadata = core_tube_from_stage1_policy(stage1, floor_boundary)
+                fixed_core_tube, core_metadata = core_tube_from_stage1_policy(
+                    stage1,
+                    floor_boundary,
+                    require_resolved_bbox=True,
+                )
                 validate_stage1_core_context(stage1, core_metadata)
                 validate_stage1_corridor_context(stage1, corridor_options)
+                floor_free_spaces = build_floor_free_spaces_for_allocation(
+                    floor_numbers=[int(f.floor_number) for f in allocation.floors],
+                    floor_boundary=floor_boundary,
+                    stage1_core_tube=fixed_core_tube,
+                    core_metadata=core_metadata,
+                    corridor_options=corridor_options,
+                    topology_mode=str(opts.topology_mode),
+                    corridor_width=corridor_width,
+                )
             except Stage1ContextMismatchError as exc:
                 payload = {
                     "result": "pipeline_failed",
@@ -380,6 +422,32 @@ class BuildingPipelineService:
                     floor_w=floor_w,
                     floor_h=floor_h,
                 )
+            except LayoutGeometryInvariantError as exc:
+                semantic_result = BudgetedBuildingSemanticResult(
+                    allocation=allocation,
+                    warnings=["Stage 1 program adapter used"],
+                    envelope=envelope,
+                    budget=compute_building_area_budget(
+                        floor_boundary=floor_boundary,
+                        floors=allocation.floors,
+                        corridor_width=corridor_width,
+                        core_area_ratio=max(0.001, float(stage1.core_context.core_area) / max(float(floor_boundary.area), 1e-6)),
+                        corridor_layout=corridor_layout,
+                        base_seed=opts.base_seed,
+                        fixed_core_tube=fixed_core_tube if "fixed_core_tube" in locals() else None,
+                    ),
+                    topology_snapshot=None,
+                )
+                return self._typed_geometry_failure_result(
+                    exc=exc,
+                    semantic_result=semantic_result,
+                    floor_boundary=floor_boundary,
+                    floor_w=floor_w,
+                    floor_h=floor_h,
+                    corridor_width=corridor_width,
+                    core_area_ratio=max(0.001, float(stage1.core_context.core_area) / max(float(floor_boundary.area), 1e-6)),
+                    topology_mode=opts.topology_mode,
+                )
             core_area_ratio = float(stage1.core_context.core_area) / max(float(floor_boundary.area), 1e-6)
             budget = compute_building_area_budget(
                 floor_boundary=floor_boundary,
@@ -397,6 +465,7 @@ class BuildingPipelineService:
                 budget=budget,
                 topology_snapshot=budget.topology_snapshot,
             )
+            stage2a_floor_free_spaces = floor_free_spaces
         else:
             logger.info("[STAGE] Start Envelope Pass")
             envelope = await generate_building_envelope(request, on_llm_output=opts.on_llm_output)
@@ -409,6 +478,7 @@ class BuildingPipelineService:
             )
             core_area_ratio = float(opts.core_area_ratio if opts.core_area_ratio is not None else default_core)
             fixed_core_tube = self._create_fixed_core(floor_boundary, core_area_ratio, opts.core_placement)
+            stage2a_floor_free_spaces = None
             logger.info(
                 "[BUDGET] Physical envelope | floors=%s | floor=%.2fx%.2f | corridor_mode=%s | corridor_width=%.2f | core_ratio=%.3f",
                 envelope.total_floors,
@@ -460,6 +530,7 @@ class BuildingPipelineService:
                 base_seed=opts.base_seed,
                 config=opts.config,
                 fixed_core_tube=fixed_core_tube,
+                floor_free_spaces=stage2a_floor_free_spaces,
             )
             logger.info("[STAGE] Geometry Complete")
             return self._result(
@@ -549,6 +620,7 @@ class BuildingPipelineService:
                 base_seed=opts.base_seed,
                 config=opts.config,
                 fixed_core_tube=fixed_core_tube,
+                floor_free_spaces=stage2a_floor_free_spaces,
             )
             logger.info("[STAGE] Geometry Complete After Semantic Repair")
             repaired_semantics.allocation = merged_allocation
@@ -590,6 +662,7 @@ class BuildingPipelineService:
         base_seed: Optional[int],
         config: Optional[SolverConfig],
         fixed_core_tube: Optional[CoreTube],
+        floor_free_spaces: Optional[dict[str, FloorFreeSpace]] = None,
     ) -> Tuple[BuildingResult, dict]:
         orchestrator = BuildingOrchestrator(
             floor_boundary=floor_boundary,
@@ -600,11 +673,14 @@ class BuildingPipelineService:
             base_seed=base_seed,
             config=config,
             topology_snapshot=topology_snapshot,
+            floor_free_spaces=floor_free_spaces,
         )
         if fixed_core_tube is not None:
             orchestrator._shared_core_tube = fixed_core_tube
         building_result = orchestrator.generate(allocation, topology_snapshot=topology_snapshot)
         building_dict = building_result_to_dict(building_result, floor_boundary)
+        if floor_free_spaces:
+            building_dict["stage2a_report"] = build_stage2a_report(floor_free_spaces)
         return building_result, building_dict
 
     def _failure_report(

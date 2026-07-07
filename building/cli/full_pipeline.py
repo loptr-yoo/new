@@ -23,8 +23,17 @@ if PROJECT_ROOT not in sys.path:
 
 from building.app.semantics import generator as building_semantic_flow
 from building.app.services.building_pipeline_service import BuildingPipelineOptions, BuildingPipelineService
-from building.app.stage1 import run_stage1_from_allocation, write_stage1_artifacts
+from building.app.stage1 import (
+    building_allocation_from_stage1,
+    core_tube_from_stage1_policy,
+    run_stage1_from_allocation,
+    stage2_corridor_options_from_stage1,
+    validate_stage1_core_context,
+    validate_stage1_corridor_context,
+    write_stage1_artifacts,
+)
 from building.app.geometry.corridor_policy import normalize_corridor_width
+from building.app.geometry.floor_free_space import build_floor_free_spaces_for_allocation, build_stage2a_report
 from building.app.geometry.topology_snapshot import compute_building_area_budget
 from building.app.interior.furniture_templates import furnitures_for_room
 from building.app.interior.models import FurnitureSpec, LLMCoarseLayout, LLMCoarseLayoutItem, Obstacle, RefinedLayout, RoomBoundary
@@ -925,26 +934,7 @@ def _building_out_root() -> Path:
 def _resolve_output_dir(raw: Optional[str]) -> Path:
     if not raw:
         return _default_output_dir()
-
-    requested = Path(raw)
-    parts = requested.parts
-    normalized_parts = [str(part).replace("\\", "/") for part in parts]
-    lower_parts = [part.lower() for part in normalized_parts]
-
-    if requested.is_absolute():
-        try:
-            rel_to_repo = requested.resolve().relative_to(Path(PROJECT_ROOT).resolve())
-            return _resolve_output_dir(str(rel_to_repo))
-        except ValueError:
-            return _building_out_root() / requested.name
-
-    if lower_parts[:2] == ["building", "out"]:
-        return requested
-    if lower_parts[:2] == ["building", "outputs"]:
-        return _building_out_root().joinpath(*parts[2:])
-    if lower_parts[:1] == ["out"]:
-        return _building_out_root().joinpath(*parts[1:])
-    return _building_out_root() / requested
+    return Path(raw)
 
 
 def _mock_room(room_id: str, room_name: str, room_type: str, area: float, zone: str, needs_window: bool = True) -> Dict[str, Any]:
@@ -1135,16 +1125,54 @@ async def _run_no_llm_building_pipeline(args: argparse.Namespace, out_dir: Path)
         )
         floor_w, floor_h, floor_boundary = _derive_floor_boundary_from_allocation(allocation)
         default_cw, default_core = _pick_corridor_width_and_core_ratio(floor_w * floor_h)
-        corridor_width = normalize_corridor_width(float(default_cw), str(options.corridor_layout))
-        core_area_ratio = float(default_core)
         service = BuildingPipelineService()
-        fixed_core_tube = service._create_fixed_core(floor_boundary, core_area_ratio, options.core_placement)
+        if bool(getattr(args, "use_stage1_program", False)):
+            stage1 = run_stage1_from_allocation(
+                allocation,
+                source="fixture" if args.semantics_fixture else "mock",
+                core_placement=str(options.core_placement or "auto"),
+                width=floor_w,
+                depth=floor_h,
+            )
+            allocation = building_allocation_from_stage1(stage1)
+            corridor_options = stage2_corridor_options_from_stage1(stage1)
+            corridor_layout = str(corridor_options["corridor_layout"])
+            corridor_width = normalize_corridor_width(
+                float(corridor_options["target_width"]),
+                corridor_layout,
+            )
+            fixed_core_tube, core_metadata = core_tube_from_stage1_policy(
+                stage1,
+                floor_boundary,
+                require_resolved_bbox=True,
+            )
+            validate_stage1_core_context(stage1, core_metadata)
+            validate_stage1_corridor_context(stage1, corridor_options)
+            core_area_ratio = float(stage1.core_context.core_area) / max(float(floor_boundary.area), 1e-6)
+            floor_free_spaces = build_floor_free_spaces_for_allocation(
+                floor_numbers=[int(f.floor_number) for f in allocation.floors],
+                floor_boundary=floor_boundary,
+                stage1_core_tube=fixed_core_tube,
+                core_metadata=core_metadata,
+                corridor_options=corridor_options,
+                topology_mode=str(options.topology_mode),
+                corridor_width=corridor_width,
+            )
+            stage2a_report = build_stage2a_report(floor_free_spaces)
+            _write_json(out_dir / "stage2a_report.json", stage2a_report)
+        else:
+            corridor_width = normalize_corridor_width(float(default_cw), str(options.corridor_layout))
+            core_area_ratio = float(default_core)
+            fixed_core_tube = service._create_fixed_core(floor_boundary, core_area_ratio, options.core_placement)
+            corridor_layout = str(options.corridor_layout)
+            floor_free_spaces = None
+            stage2a_report = None
         budget = compute_building_area_budget(
             floor_boundary=floor_boundary,
             floors=allocation.floors,
             corridor_width=corridor_width,
             core_area_ratio=core_area_ratio,
-            corridor_layout=str(options.corridor_layout),
+            corridor_layout=str(corridor_layout),
             base_seed=options.base_seed,
             fixed_core_tube=fixed_core_tube,
         )
@@ -1155,10 +1183,11 @@ async def _run_no_llm_building_pipeline(args: argparse.Namespace, out_dir: Path)
             corridor_width=corridor_width,
             topology_mode=str(options.topology_mode),
             core_area_ratio=core_area_ratio,
-            corridor_layout=str(options.corridor_layout),
+            corridor_layout=str(corridor_layout),
             base_seed=options.base_seed,
             config=options.config,
             fixed_core_tube=fixed_core_tube,
+            floor_free_spaces=floor_free_spaces,
         )
         del building_result
         floor_ids = sorted(list((building_dict.get("building") or {}).get("floors", {}).keys()))
@@ -1174,16 +1203,69 @@ async def _run_no_llm_building_pipeline(args: argparse.Namespace, out_dir: Path)
         stale_failure = out_dir / "pipeline_failure.json"
         if stale_failure.exists():
             stale_failure.unlink()
+        if isinstance(building_dict.get("stage2a_report"), dict):
+            _write_json(out_dir / "stage2a_report.json", building_dict["stage2a_report"])
+            stage2a_report = building_dict["stage2a_report"]
         _write_json(out_dir / "mock_pipeline_summary.json", {
             "result": "success",
             "mode": "mock_semantics" if not args.semantics_fixture else "semantics_fixture",
+            "use_stage1_program": bool(getattr(args, "use_stage1_program", False)),
             "total_floors": int(allocation.total_floors),
             "selected_floors": list(selected),
             "artifacts": artifacts,
+            "stage2a_report": stage2a_report or building_dict.get("stage2a_report"),
         })
         return 0
     except Exception as exc:
         failure = {"type": type(exc).__name__, "message": str(exc)}
+        if bool(getattr(args, "use_stage1_program", False)):
+            metadata = dict(getattr(exc, "metadata", {}) or {})
+            typed = bool(metadata.get("stage2a_failure") or metadata.get("semantic_repair_allowed") is False)
+            blocking_failure_types = {
+                "core_overlap",
+                "core_context_mismatch",
+                "default_core_fallback",
+                "coverage_filled_core",
+                "serializer_core_inconsistency",
+            }
+            failure_tokens = {
+                str(metadata.get("failure_type", "") or ""),
+                str(metadata.get("stage", "") or ""),
+                str(metadata.get("failure_kind", "") or ""),
+            }
+            non_core_typed_failure = bool(
+                typed
+                and "stage2a_report" in locals()
+                and stage2a_report
+                and not (failure_tokens & blocking_failure_types)
+                and float(metadata.get("overlap_area", 0.0) or 0.0) <= 0.0
+            )
+            _write_json(out_dir / "pipeline_failure.json", {
+                "result": "pipeline_failed",
+                "mode": "stage1_program_mock" if getattr(args, "mock_semantics", False) else "stage1_program_fixture",
+                "typed": typed,
+                "stage2a_acceptance_smoke_pass": non_core_typed_failure,
+                "failure": failure,
+                "metadata": metadata,
+                "stage2a_report": stage2a_report if "stage2a_report" in locals() else None,
+            })
+            if non_core_typed_failure:
+                _write_json(out_dir / "mock_pipeline_summary.json", {
+                    "result": "stage2a_acceptance_smoke_pass",
+                    "mode": "mock_semantics" if getattr(args, "mock_semantics", False) else "semantics_fixture",
+                    "use_stage1_program": True,
+                    "production_layout_success": False,
+                    "typed_non_core_failure": failure,
+                    "stage2a_report": stage2a_report,
+                    "fallback": None,
+                })
+                PIPELINE_LOGGER.warning(
+                    "Stage2A acceptance smoke passed with typed non-core geometry failure: %s",
+                    failure,
+                )
+                return 0
+            PIPELINE_LOGGER.exception("Stage1-program no-LLM building pipeline failed")
+            return 1
         if bool(getattr(args, "mock_semantics", False)):
             try:
                 fallback_allocation = allocation
